@@ -1,0 +1,3 @@
+[submodule "suspension-model"]
+	path = suspension-model
+	url = https://github.com/bellabat10/suspension-model.git

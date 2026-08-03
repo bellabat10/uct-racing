@@ -1,0 +1,282 @@
+# =============================================================================
+# UCT Racing FSA — SolidWorks Hardpoint Input
+# =============================================================================
+#
+# All coordinates use the SolidWorks convention: X backward, Y up, Z right.
+# Units: millimetres.
+#
+# This file is the single source of truth for raw geometry measurements.
+# The conversion script reads it and outputs ISO 8855 coordinates for the
+# solver's geometry.yaml.
+#
+# Node labels match the SolidWorks model annotations:
+#   Front chassis mounts:  a (lower fwd), b (upper fwd), c (upper rear), d (lower rear)
+#   Rear chassis mounts:   e (lower fwd), f (upper fwd), g (upper rear), h (lower rear)
+#   Upright mounts:        p (upper outboard), q (lower outboard)
+#
+# Freedom types:
+#   fixed   — point does not move during optimisation
+#   bar     — point slides along a line between end_a and end_b (1 free number: t)
+#   box     — point moves within a bounding box (up to 3 free numbers)
+#   calc    — point is derived from other geometry (e.g. rack height from FVIC)
+#
+# =============================================================================
+
+coordinate_system: solidworks   # X backward, Y up, Z right
+wheelbase: 1625                 # mm, between front and rear axle centrelines
+
+
+# =============================================================================
+# FRONT LEFT CORNER
+# =============================================================================
+front:
+
+  # -------------------------------------------------------
+  # LOWER WISHBONE — fully fixed for all iterations
+  # -------------------------------------------------------
+
+  lower_wishbone_inboard_front:                 # node a
+    position: [-1310, 50, 195]
+    freedom: fixed
+
+  lower_wishbone_inboard_rear:                  # node d
+    position: [-907.32, 50.67, 239.7]
+    freedom: fixed
+    # CHECK: you typed [-920, 50, 239.74] in your node list but the filled
+    # table shows [-907.32, 50.67, 239.7]. Using the table value here.
+    # Please confirm in SolidWorks which is the actual mount position.
+
+  lower_wishbone_outboard:                      # node q
+    position: [-1090.06, 60.54, 603.18]
+    freedom: fixed
+
+  # -------------------------------------------------------
+  # UPPER WISHBONE — chassis mounts FREE, upright mount FIXED
+  # -------------------------------------------------------
+
+  upper_wishbone_inboard_front:                 # node b (slides along chassis tube)
+    initial_guess: [-1310, 203.9, 195]
+    freedom: bar
+    bar:
+      end_a: [-1310, 100, 195]                  # bottom of available tube range
+      end_b: [-1310, 325, 207.5]                # top of available tube range
+    # CONSTRAINT: Y must stay below upper_wishbone_outboard Y (267.51).
+    # The bar goes up to Y=325, but the physics caps it at Y=267.51.
+    # The effective bar is therefore clipped to roughly t=0.745.
+
+  upper_wishbone_inboard_rear:                  # node c (slides along chassis tube)
+    initial_guess: [-938.03, 210.91, 259.1]
+    freedom: bar
+    bar:
+      end_a: [-926.79, 155.23, 247.03]          # bottom of available tube range
+      end_b: [-938.03, 329.42, 259.1]           # top of available tube range
+    # CONSTRAINT: Y must stay below upper_wishbone_outboard Y (267.51).
+    # The bar goes up to Y=329.42, but the physics caps it at Y=267.51.
+    # The effective bar is clipped to roughly t=0.644.
+
+  upper_wishbone_outboard:                      # node p
+    position: [-1105.06, 267.51, 599.26]
+    freedom: fixed
+    # FUTURE: keep p-q length constant but allow angle to vary (changes KPI,
+    # scrub radius). This is the next iteration after tonight.
+
+  # -------------------------------------------------------
+  # STEERING RACK AND TIE ROD
+  # -------------------------------------------------------
+  #
+  # Rack length: 610 mm, centred on the vehicle centreline.
+  # Half-rack = 305 mm per side. The rack end (tie rod attachment)
+  # sits at Z_sw = 305 mm from the centreline.
+  #
+  # The tie rod connects from the rack end (trackrod_inboard) to
+  # the steering arm on the upright (trackrod_outboard).
+
+  trackrod_inboard:                             # rack end (tie rod inner)
+    position: [-1100, 50, 305]                          # PARTIALLY KNOWN — see below
+    freedom: fixed
+    # Z_sw = 305 (half of 610 mm rack, measured from centreline)
+    # X_sw = ? MISSING — fore-aft position of the rack on the chassis
+    # Y_sw = ? MISSING — height of the rack on the chassis
+    #
+    # In a later iteration this becomes 'calc' (derived from FVIC
+    # line intersection to eliminate bump steer at static ride height,
+    # where only the Y_sw / height is solved and X_sw stays fixed).
+
+  trackrod_outboard:                            # steering arm on upright
+    initial_guess: [-1220.7, 158.89, 490.88]                       # MISSING — pick an initial position
+    freedom: box
+    box:
+      min: [-1295.7, 26.17, 490.88]
+      max: [-1145.69, 291.61, 490.88]
+    # For tonight's iteration this is FIXED at whatever initial position
+    # you pick. The box freedom activates in a later iteration.
+    # A reasonable first pick might be the box midpoint:
+    #   [-1220.7, 158.89, 490.88]
+    # But check this looks sensible in the CAD first.
+
+  # -------------------------------------------------------
+  # AXLE — wheel spin axis (bearing centres in the upright)
+  # -------------------------------------------------------
+  #
+  # "Axle" in the solver means the wheel spin axis, NOT a physical
+  # shaft. These are the centres of the two bearings in the upright.
+  # The solver uses them to compute wheel centre, contact patch,
+  # camber, caster, and KPI. They are required hardpoints.
+
+  axle_inboard:                                 # inner bearing centre
+    position: [-1090, 165, 565]                             # MISSING — measure from upright CAD
+    freedom: fixed
+
+  axle_outboard:                                # outer bearing centre / hub face
+    position: [-1090, 165, 605]                             # MISSING — measure from upright CAD
+    freedom: fixed
+
+  # -------------------------------------------------------
+  # REFERENCE (not solver hardpoints, used for conversion)
+  # -------------------------------------------------------
+
+  wheel_center: [-1090.06, 165.36, 585.36]
+  half_track: 600                               # mm (Y from centreline)
+  full_track: 1200                              # mm
+
+
+# =============================================================================
+# REAR LEFT CORNER
+# =============================================================================
+rear:
+
+  # -------------------------------------------------------
+  # LOWER WISHBONE — fully fixed for all iterations
+  # -------------------------------------------------------
+
+  lower_wishbone_inboard_front:                 # node e
+    position: [390, 50, 195]
+    freedom: fixed
+
+  lower_wishbone_inboard_rear:                  # node h
+    position: [677.3, 50, 189.71]
+    freedom: fixed
+    # CHECK: you typed [690, 50, 189.71] in your node list but the filled
+    # table shows [677.3, 50, 189.71]. X differs by 12.7 mm. Using the
+    # table value — please confirm in SolidWorks.
+
+  lower_wishbone_outboard:                      # node q_r
+    position: [563.12, 59.42, 584.94]
+    freedom: fixed
+
+  # -------------------------------------------------------
+  # UPPER WISHBONE — chassis mounts FREE, upright mount FIXED
+  # -------------------------------------------------------
+
+  upper_wishbone_inboard_front:                 # node f (slides along chassis tube)
+    initial_guess: [390, 190.4, 195]
+    freedom: bar
+    bar:
+      end_a: [390, 50, 195]                    # bottom of available tube range
+      end_b: [390, 375, 195]                   # top of available tube range
+    # CONSTRAINT: Y must stay below upper_wishbone_outboard Y (275.89).
+    # The bar goes up to Y=375, but the physics caps it at Y=275.89.
+    # The effective bar is clipped to roughly t=0.695.
+
+  upper_wishbone_inboard_rear:                  # node g (slides along chassis tube)
+    initial_guess: [690, 196.96, 202.21]
+    freedom: bar
+    bar:
+      end_a: [677.3, 50, 189.71]               # bottom of available tube range
+      end_b: [685.2, 196.96, 194.54]           # top of available tube range
+    # CHECK: your initial guess [690, 196.96, 202.21] does NOT lie on the
+    # line from end_a to end_b. The X values differ (690 vs 677-685 range)
+    # and Z differs (202.21 vs 189-194 range). Either the bar endpoints or
+    # the initial guess needs correcting. Please re-measure in SolidWorks.
+    #
+    # Also: you listed node g as [690, 375, 202.21] but the bar only
+    # reaches Y=196.96 at end_b. The Y=375 value doesn't match the table.
+    #
+    # CONSTRAINT: Y must stay below upper_wishbone_outboard Y (275.89).
+    # If the bar endpoint is correct at Y=196.96, this is already satisfied.
+
+  upper_wishbone_outboard:                      # node p_r
+    position: [563.12, 275.89, 584.94]
+    freedom: fixed
+
+  # -------------------------------------------------------
+  # TOE LINK — rear is non-steered, uses toe link not track rod
+  # -------------------------------------------------------
+
+  toe_link_inboard:                             # chassis mount
+    position: null                              # MISSING — measure from SolidWorks
+    freedom: fixed
+
+  toe_link_outboard:                            # upright mount
+    position: null                              # MISSING — measure from SolidWorks
+    freedom: fixed
+
+  # -------------------------------------------------------
+  # AXLE — defines the wheel spin axis, needed by solver
+  # -------------------------------------------------------
+
+  axle_inboard:
+    position: null                              # MISSING — measure from SolidWorks
+    freedom: fixed
+
+  axle_outboard:
+    position: null                              # MISSING — measure from SolidWorks
+    freedom: fixed
+
+  # -------------------------------------------------------
+  # REFERENCE
+  # -------------------------------------------------------
+
+  wheel_center: [535.72, 165.36, 645.34]
+  half_track: 650                               # mm (Y from centreline)
+  full_track: 1300                              # mm
+
+
+# =============================================================================
+# GLOBAL CONSTRAINTS
+# =============================================================================
+#
+# These apply across all iterations of the optimiser:
+#
+# 1. UPPER WISHBONE HEIGHT LIMIT
+#    For any corner, the upper wishbone chassis mount Y (SolidWorks up)
+#    must never exceed the upper wishbone upright mount Y. If the chassis
+#    mount sits higher than the upright mount, the wishbone angles upward
+#    from chassis to wheel, which inverts the roll centre and breaks the
+#    suspension geometry.
+#
+#    Front limit: Y_chassis < 267.51
+#    Rear limit:  Y_chassis < 275.89
+#
+# 2. UPRIGHT LENGTH (future iteration)
+#    The distance from p to q (upper to lower ball joint on the upright)
+#    stays constant. The angle of the p-q line relative to the wheel
+#    axis can vary, which changes KPI and scrub radius. This changes the
+#    length of the upper wishbone (b-p or c-p) as a consequence.
+#    Not active tonight — both p and q are fixed.
+#
+# =============================================================================
+
+
+# =============================================================================
+# VEHICLE CONFIG (for geometry.yaml generation)
+# =============================================================================
+vehicle:
+  cg_height: 275                                # mm above ground
+  # cg_x: null                                  # MISSING — longitudinal CG position
+  wheelbase: 1625                               # mm
+
+  steering_rack:
+    total_length: 610                           # mm
+    half_length: 305                            # mm per side from centreline
+    # x_position: null                          # MISSING — fore-aft position on chassis
+    # y_position: null                          # MISSING — height on chassis
+
+  tire:
+    # Dunlop SP Touring R1 155/70R13 75T
+    section_width: 155
+    aspect_ratio: 0.70
+    rim_diameter: 13                     # inches
+
+  wheel:
+    offset: null                                # mm, ET convention
