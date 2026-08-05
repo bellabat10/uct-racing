@@ -13,10 +13,10 @@ both wheels. That gives roll centre and camber compensation natively instead of
 computing them by hand.
 
 Simplifications for this iteration:
-  - lower wishbone chassis mounts   FIXED
-  - lower ball joint                FIXED
-  - ball joint separation           FIXED (upright vertical -> KPI = 0)
-  - upper chassis mount             THE FREE VARIABLE
+  - lower wishbone chassis mounts   FIXED (loaded from the CAD-derived geometry)
+  - lower ball joint                FIXED (loaded from the CAD-derived geometry)
+  - upper ball joint                FIXED (loaded from the CAD-derived geometry)
+  - upper chassis mount             THE FREE VARIABLE (Z only - see below)
 
 Coordinates: ISO 8855 - X forward, Y left, Z up, millimetres.
 The right corner is mirrored automatically (the `right` block is omitted).
@@ -38,6 +38,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
 
@@ -45,47 +46,83 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
 # 1. CONFIGURATION  -  the only block you should need to edit
 # ===========================================================================
 
-# ---- FIXED hardpoints, LEFT corner (right is mirrored) -------------------
-LOWER_INBOARD_FRONT = (250.0, 215.0, 165.0)
-LOWER_INBOARD_REAR = (-250.0, 215.0, 165.0)
-LOWER_OUTBOARD = (0.0, 560.0, 130.0)          # LOWER BALL JOINT
+AXLE_POSITION = "front"                        # "front" or "rear"
 
-# ---- upright parameters fixed for iteration 1 ----------------------------
-BJ_SEPARATION = 220.0                          # vertical; upright modelled vertical
-UPPER_OUTBOARD = (LOWER_OUTBOARD[0],
-                  LOWER_OUTBOARD[1],
-                  LOWER_OUTBOARD[2] + BJ_SEPARATION)
+# ---- FIXED hardpoints, LEFT corner (right is mirrored) --------------------
+# Loaded from configs/uct_<axle_position>_geometry_generated.yaml - the
+# CAD-derived geometry - rather than hand-typed. A previous hand-typed
+# version of this block had the lower wishbone's chassis-side mount ~35mm
+# ABOVE the upright mount; the real CAD has it ~10mm BELOW, which is the
+# opposite relationship and was inflating the computed roll centre height.
+
+def _load_generated_geometry(axle_position: str) -> dict:
+    path = (Path(__file__).resolve().parent / "configs"
+            / f"uct_{axle_position}_geometry_generated.yaml")
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+_GEOMETRY = _load_generated_geometry(AXLE_POSITION)
+_HARDPOINTS = _GEOMETRY["hardpoints"]
+
+
+def _hp(name: str) -> tuple[float, float, float]:
+    p = _HARDPOINTS[name]
+    return (float(p["x"]), float(p["y"]), float(p["z"]))
+
+
+LOWER_INBOARD_FRONT = _hp("lower_wishbone_inboard_front")
+LOWER_INBOARD_REAR = _hp("lower_wishbone_inboard_rear")
+LOWER_OUTBOARD = _hp("lower_wishbone_outboard")           # LOWER BALL JOINT
+UPPER_OUTBOARD = _hp("upper_wishbone_outboard")            # UPPER BALL JOINT
 
 # ---- upper chassis legs: x fixed, y and z are the sweep variables --------
-UPPER_INBOARD_X_FRONT = 225.0
-UPPER_INBOARD_X_REAR = -275.0
+# X stays at each leg's real chassis-tube fore/aft position.
+UPPER_INBOARD_X_FRONT = _hp("upper_wishbone_inboard_front")[0]
+UPPER_INBOARD_X_REAR = _hp("upper_wishbone_inboard_rear")[0]
 
 # ---- wheel / axle --------------------------------------------------------
-WHEEL_CENTRE = (0.0, 600.0, 260.0)
-AXLE_HALF_LENGTH = 75.0                        # z equal both ends -> 0 static camber
+_AXLE_INBOARD = _hp("axle_inboard")
+_AXLE_OUTBOARD = _hp("axle_outboard")
+WHEEL_CENTRE = tuple((a + b) / 2.0 for a, b in zip(_AXLE_INBOARD, _AXLE_OUTBOARD))
+AXLE_HALF_LENGTH = abs(_AXLE_OUTBOARD[1] - _AXLE_INBOARD[1]) / 2.0
 
 # ---- track rod (keeps the upright constrained; does not affect camber,
 #      roll centre or the front-view IC) ----------------------------------
-TRACKROD_INBOARD = (50.0, 200.0, 200.0)
-TRACKROD_OUTBOARD = (120.0, 545.0, 215.0)
+# The tie rod (rack to steering arm) must run as one straight line, level
+# and with no fore-aft kink - a raked or bent tie rod is a bump-steer/binding
+# problem and the rack can't push the steering arm cleanly through one. The
+# CAD source flags trackrod_inboard's X and height as placeholders (both
+# marked MISSING in solidworks_points.yaml), so instead of trusting them
+# as-is, the rack attachment is pulled onto the same X and Z as the outboard
+# (steering arm) mount - only Y (lateral, rack travel) differs between them.
+# Both sides move together (mirrored), so the rack stays level and straight.
+TRACKROD_OUTBOARD = _hp("trackrod_outboard")
+_TRACKROD_INBOARD_RAW = _hp("trackrod_inboard")
+TRACKROD_INBOARD = (TRACKROD_OUTBOARD[0], _TRACKROD_INBOARD_RAW[1], TRACKROD_OUTBOARD[2])
 
 # ---- vehicle context -----------------------------------------------------
-AXLE_POSITION = "front"                        # "front" or "rear"
-CG_POSITION = (812.0, 0.0, 275.0)
-WHEELBASE = 1625.0
-TIRE = {"aspect_ratio": 0.55, "section_width": 205, "rim_diameter": 13}
-WHEEL_OFFSET = 0.0
+_CG = _GEOMETRY["config"]["cg_position"]
+CG_POSITION = (float(_CG["x"]), float(_CG["y"]), float(_CG["z"]))
+WHEELBASE = float(_GEOMETRY["config"]["wheelbase"])
+_TIRE_CFG = _GEOMETRY["config"]["wheel"]["tire"]
+TIRE = {"aspect_ratio": float(_TIRE_CFG["aspect_ratio"]),
+        "section_width": float(_TIRE_CFG["section_width"]),
+        "rim_diameter": float(_TIRE_CFG["rim_diameter"])}
+WHEEL_OFFSET = float(_GEOMETRY["config"]["wheel"]["offset"] or 0)
 
 # ---- outer sweep: upper chassis mount ------------------------------------
-# The upper wishbone bolts to the same chassis-side vertical plate as the
-# lower wishbone, so Y is fixed to the lower wishbone's inboard Y rather than
-# swept. Z is capped at UPPER_OUTBOARD's height (350mm) - the chassis-side
-# mount can never sit higher than the upright-side ball joint - and sweeps
+# The upper wishbone bolts to the same chassis-side structure as the lower
+# wishbone. In the real chassis the front and rear legs are NOT at the same
+# Y (209.64 vs 254.34 for the lower wishbone) - there's no single "vertical
+# plate" - so each leg's Y is pinned to its OWN lower-wishbone counterpart.
+# Z is shared front/rear (the real lower wishbone's front/rear Z differ by
+# well under 1mm, so this is an accurate simplification) and is the only
+# free variable, capped at the upper ball joint's height and sweeping
 # downward from there.
-assert LOWER_INBOARD_FRONT[1] == LOWER_INBOARD_REAR[1], \
-    "lower wishbone inboard Y must match front/rear to define one chassis plane"
-CHASSIS_MOUNT_Y = LOWER_INBOARD_FRONT[1]
-Y_RANGE = np.array([CHASSIS_MOUNT_Y])
+CHASSIS_MOUNT_Y_FRONT = LOWER_INBOARD_FRONT[1]
+CHASSIS_MOUNT_Y_REAR = LOWER_INBOARD_REAR[1]
+Y_RANGE = np.array([CHASSIS_MOUNT_Y_FRONT])    # reporting/plot axis; see build_geometry
 Z_RANGE = np.arange(240.0, UPPER_OUTBOARD[2] + 1e-9, 10.0)
 
 # ---- inner sweeps: motion ------------------------------------------------
@@ -157,11 +194,17 @@ BASE_AXLE = {
 
 
 def build_geometry(y_up: float, z_up: float) -> dict:
-    """Place the upper chassis mount at (y_up, z_up) on the left corner."""
+    """Place the upper chassis mount at height z_up on the left corner.
+
+    y_up is accepted for interface stability (it's what's swept/reported)
+    but not used directly: each leg's Y is pinned to its own real
+    lower-wishbone counterpart (CHASSIS_MOUNT_Y_FRONT/REAR), since the front
+    and rear legs sit at different Y in the real chassis.
+    """
     g = copy.deepcopy(BASE_AXLE)
     hp = g["hardpoints"]["left"]
-    hp["upper_wishbone_inboard_front"] = _pt((UPPER_INBOARD_X_FRONT, y_up, z_up))
-    hp["upper_wishbone_inboard_rear"] = _pt((UPPER_INBOARD_X_REAR, y_up, z_up))
+    hp["upper_wishbone_inboard_front"] = _pt((UPPER_INBOARD_X_FRONT, CHASSIS_MOUNT_Y_FRONT, z_up))
+    hp["upper_wishbone_inboard_rear"] = _pt((UPPER_INBOARD_X_REAR, CHASSIS_MOUNT_Y_REAR, z_up))
     return g
 
 
