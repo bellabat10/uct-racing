@@ -447,10 +447,11 @@ def sae_to_iso(point: tuple[float, float, float]) -> tuple[float, float, float]:
 # ===========================================================================
 
 def run_study(geometry: dict, out_dir: Path, kpi_list: list[float], caster_list: list[float],
-              motion_names: list[str] | None = None) -> pd.DataFrame:
+              motion_names: list[str] | None = None, save_csvs: bool = False) -> pd.DataFrame:
     motion_names = motion_names or list(MOTIONS.keys())
     out_dir.mkdir(parents=True, exist_ok=True)
-    write_motion_yamls(out_dir / "sweeps")
+    if save_csvs:
+        write_motion_yamls(out_dir / "sweeps")
 
     index_rows = []
     for kpi_target in kpi_list:
@@ -476,11 +477,13 @@ def run_study(geometry: dict, out_dir: Path, kpi_list: list[float], caster_list:
                     for label, spec in specs:
                         df = solve_motion(suspension, spec)
                         nonconverged_total += int((~df["solver_converged"]).sum())
-                        df.to_csv(variant_dir / f"{name}_{label}.csv", index=False)
+                        if save_csvs:
+                            df.to_csv(variant_dir / f"{name}_{label}.csv", index=False)
                 else:
                     df = solve_motion(suspension, specs)
                     nonconverged_total += int((~df["solver_converged"]).sum())
-                    df.to_csv(variant_dir / f"{name}.csv", index=False)
+                    if save_csvs:
+                        df.to_csv(variant_dir / f"{name}.csv", index=False)
 
             print(f"  achieved kpi={achieved_kpi:.3f} caster={achieved_caster:.3f} "
                   f"({n_iter} Newton iterations), {nonconverged_total} non-converged steps total")
@@ -531,10 +534,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--geometry", type=Path, default=DEFAULT_GEOMETRY_PATH)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--kpi", type=float, nargs="+", default=[4.0, 6.0, 8.0])
-    parser.add_argument("--caster", type=float, nargs="+", default=[3.0, 5.0, 7.0])
+    parser.add_argument("--kpi", type=float, nargs="+", default=[7.0])
+    parser.add_argument("--caster", type=float, nargs="+", default=[5.0])
     parser.add_argument("--motions", nargs="+", default=None, choices=list(MOTIONS.keys()))
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--save-csvs", action="store_true")
     args = parser.parse_args()
 
     if args.smoke:
@@ -543,7 +547,7 @@ def main() -> None:
 
     cad_geometry = yaml.safe_load(open(args.geometry))
     axle_geometry = sc.cad_geometry_to_axle_dict(cad_geometry, name="motion_study")
-    run_study(axle_geometry, args.out, args.kpi, args.caster, args.motions)
+    run_study(axle_geometry, args.out, args.kpi, args.caster, args.motions, args.save_csvs)
 
 
 if __name__ == "__main__":

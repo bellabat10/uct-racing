@@ -2,7 +2,7 @@
 Stage C - assemble the final recommended geometry from Stage A (mount
 height / KPI sweep) and Stage B (caster / mechanical trail refinement),
 re-solve it once to confirm nothing drifted, render the annotated wheel
-view, and write everything into outputs/optimal/.
+view, and write everything into outputs/front/optimal/.
 
 Both wishbones' outboard ball joints move in the final geometry - Stage B's
 existing rotate_axis() repositions BOTH p (upper) and q (lower) along the
@@ -13,7 +13,7 @@ this stage's confirmatory re-solve matters.
 
 Usage:
     python scripts/build_optimal_geometry.py
-    python scripts/build_optimal_geometry.py --stage-a outputs/mount_height_kpi_sweep/best_zkpi_geometry.yaml --stage-b outputs/optimal/caster_and_trail/best_caster_offset.yaml
+    python scripts/build_optimal_geometry.py --stage-a outputs/front/mount_height_kpi_sweep/best_zkpi_geometry.yaml --stage-b outputs/front/caster_and_trail/best_caster_offset.yaml
 """
 
 from __future__ import annotations
@@ -32,12 +32,12 @@ import _sweep_common as sc  # noqa: E402
 import wheel_view  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OUTPUT_DIR = REPO_ROOT / "outputs" / "optimal"
+OUTPUT_DIR = REPO_ROOT / "outputs" / "front" / "optimal"
 
-DEFAULT_STAGE_A = REPO_ROOT / "outputs" / "mount_height_kpi_sweep" / "best_zkpi_geometry.yaml"
-DEFAULT_STAGE_B = OUTPUT_DIR / "caster_and_trail" / "best_caster_offset.yaml"
-STAGE_A_RESULTS_CSV = REPO_ROOT / "outputs" / "mount_height_kpi_sweep" / "mount_kpi_results.csv"
-STAGE_A_BEST_TRAVEL_PNG = REPO_ROOT / "outputs" / "mount_height_kpi_sweep" / "mount_kpi_best_vs_travel.png"
+DEFAULT_STAGE_A = REPO_ROOT / "outputs" / "front" / "mount_height_kpi_sweep" / "best_zkpi_geometry.yaml"
+DEFAULT_STAGE_B = REPO_ROOT / "outputs" / "front" / "caster_and_trail" / "best_caster_offset.yaml"
+STAGE_A_RESULTS_CSV = REPO_ROOT / "outputs" / "front" / "mount_height_kpi_sweep" / "mount_kpi_results.csv"
+STAGE_A_BEST_TRAVEL_PNG = REPO_ROOT / "outputs" / "front" / "mount_height_kpi_sweep" / "mount_kpi_best_vs_travel.png"
 
 # The 7 metrics Stage A actually scored/searched over - the drift check
 # compares Stage A's predicted value for these against what this stage's
@@ -45,7 +45,7 @@ STAGE_A_BEST_TRAVEL_PNG = REPO_ROOT / "outputs" / "mount_height_kpi_sweep" / "mo
 DRIFT_CHECK_METRICS = [
     "bump_steer_max", "camber_gain_roll_pct", "roll_centre_z_static",
     "kpi_static", "scrub_radius_static", "roll_steer_front",
-    "camber_gain_bump_per25mm",
+    "camber_gain_bump_per25mm", "camber_static",
 ]
 # Reasonable per-metric tolerances before flagging a drift warning.
 DRIFT_TOLERANCE = {
@@ -56,6 +56,7 @@ DRIFT_TOLERANCE = {
     "scrub_radius_static": 2.0,
     "roll_steer_front": 0.05,
     "camber_gain_bump_per25mm": 0.1,
+    "camber_static": 0.5,
 }
 
 
@@ -160,13 +161,31 @@ def main() -> None:
     corner_config = corner.config if corner.config is not None else suspension.config
     ctx = MetricContext(state=corner_state, suspension=corner, config=corner_config)
 
-    wheel_view.render(ctx, OUTPUT_DIR / "wheel_view.png")
+    wheel_view_summary = wheel_view.render(
+        ctx, OUTPUT_DIR / "wheel_view.png",
+        roll_centre_z=metrics.get("roll_centre_z_static"),
+        weighted_cost=metrics.get("weighted_cost_full9"))
 
     # ---- 4-view linkage render, for continuity -----------------------------
     from kinematics.cli.visualization.api import visualize_geometry
 
-    result = visualize_geometry(suspension, OUTPUT_DIR / "linkage_4view.png")
+    linkage_png = OUTPUT_DIR / "linkage_4view.png"
+    result = visualize_geometry(suspension, linkage_png)
     print(f"wrote {result.output_path}  (contact patch on ground: {result.contact_patch_on_ground})")
+
+    # Same headline metrics as wheel_view.png's text box, plus P/Q coordinates
+    # (upper/lower wishbone outboard ball joints) - overlaid onto the
+    # already-rendered PNG so kinematics.cli.visualization.api stays untouched.
+    p_xyz, q_xyz = wheel_view_summary["p_xyz"], wheel_view_summary["q_xyz"]
+    linkage_lines = wheel_view.build_summary_lines(
+        wheel_view_summary["kpi"], wheel_view_summary["caster"], wheel_view_summary["scrub"],
+        wheel_view_summary["trail"], wheel_view_summary["camber"], wheel_view_summary["toe"],
+        wheel_view_summary["roll_centre_z"], wheel_view_summary["weighted_cost"],
+    ) + [
+        f"P: ({p_xyz[0]:.1f}, {p_xyz[1]:.1f}, {p_xyz[2]:.1f}) mm",
+        f"Q: ({q_xyz[0]:.1f}, {q_xyz[1]:.1f}, {q_xyz[2]:.1f}) mm",
+    ]
+    wheel_view.annotate_png(linkage_png, linkage_lines)
 
     # ---- outputs ------------------------------------------------------------
     geom_out = OUTPUT_DIR / "optimal_geometry.yaml"

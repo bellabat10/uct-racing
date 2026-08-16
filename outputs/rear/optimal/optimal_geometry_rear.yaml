@@ -1,0 +1,66 @@
+name: UCT Racing FSA rear left - optimal (Stage A + B combined)
+version: 1.0.0
+units: millimeters
+type: double_wishbone
+scope: corner
+side: left
+actuation:
+  type: direct
+  mount: lower_wishbone
+spring:
+  type: none
+config:
+  steering:
+    type: none
+  wheel:
+    offset: 0
+    tire:
+      section_width: 155
+      aspect_ratio: 0.7
+      rim_diameter: 13
+  cg_position:
+    x: -812.5
+    y: 0
+    z: 275
+  wheelbase: 1625
+hardpoints:
+  lower_wishbone_inboard_front:
+    x: -1479.28
+    y: 199.66
+    z: 158.24
+  lower_wishbone_inboard_rear:
+    x: -1766.58
+    y: 194.37
+    z: 158.24
+  lower_wishbone_outboard:
+    x: -1630.6830176226933
+    y: 697.293014089541
+    z: 168.44966069511833
+  upper_wishbone_inboard_front:
+    x: -1479.28
+    y: 199.66
+    z: 335.0
+  upper_wishbone_inboard_rear:
+    x: -1779.28
+    y: 194.37
+    z: 335.0
+  upper_wishbone_outboard:
+    x: -1656.919556200341
+    y: 674.6657376459921
+    z: 382.1291199424003
+  toe_link_inboard:
+    x: -1702.4
+    y: 200.0
+    z: 167.66
+  toe_link_outboard:
+    x: -1702.4
+    y: 697.293014089541
+    z: 167.66
+  axle_inboard:
+    x: -1625.0
+    y: 668.286517820573
+    z: 284.20821962402266
+  axle_outboard:
+    x: -1625.0
+    y: 708.2119097574476
+    z: 286.6501612054169

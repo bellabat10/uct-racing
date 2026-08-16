@@ -18,7 +18,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIGS_DIR = REPO_ROOT / "configs"
 
-MOTION_STEPS = 21          # must be odd so a step lands exactly on static
+MOTION_STEPS = 11          # must be odd so a step lands exactly on static
 BUMP_TRAVEL = 30.0         # +/- mm, both wheels together
 ROLL_TRAVEL = 25.0         # +/- mm, wheels opposed (~2.4 deg roll on 1200 track)
 
@@ -165,6 +165,7 @@ TARGETS_FULL = {
     "caster_static":                (3.0,   7.0,   5.0,   6.0),
     "camber_gain_bump_per25mm":     (-0.8,  -0.2,  -0.5,  -0.3),
     "mechanical_trail_static":      (5.0,   20.0,  10.0,  15.0),
+    "camber_static":                (-4.0,  -2.0,  -3.5,  -3.5),
 }
 
 WEIGHTS_FULL = {
@@ -177,6 +178,11 @@ WEIGHTS_FULL = {
     "caster_static":            0.79,
     "camber_gain_bump_per25mm": 0.79,
     "mechanical_trail_static":  0.75,
+    # camber_static is Tier 4: checked against its band in TARGETS_FULL (so
+    # it still shows PASS/FAIL in reporting) but deliberately has no weight
+    # here, so weighted_cost() below skips it - it's driven directly by
+    # mount_kpi_sweep.py's own camber-correction rotation now, not by score
+    # pressure, and double-counting it here would fight that rotation.
 }
 
 MAX_NORMALIZED_ERROR = 5.0  # cap, in units of "acceptance-band-widths past optimal"
@@ -193,9 +199,13 @@ def distance_from_optimal(value, opt_lo, opt_hi, band_lo, band_hi) -> float:
 
 
 def weighted_cost(row: dict, targets: dict, weights: dict) -> float:
+    """Targets present in `targets` but absent from `weights` (e.g.
+    camber_static - Tier 4) are still checkable against their band
+    elsewhere, but don't contribute to this sum."""
     return sum(
         weights[name] * distance_from_optimal(row.get(name), opt_lo, opt_hi, lo, hi)
         for name, (lo, hi, opt_lo, opt_hi) in targets.items()
+        if name in weights
     )
 
 
@@ -210,7 +220,6 @@ def evaluate_candidate(geometry: dict) -> dict:
     subset, Stage C against the full 9, so that stays candidate-set-specific.
     """
     bump = run_sweep(geometry, BUMP_SWEEP)
-    roll = run_sweep(geometry, ROLL_SWEEP)
     mid = len(bump) // 2  # static ride height
 
     static = bump[mid]
@@ -221,6 +230,19 @@ def evaluate_candidate(geometry: dict) -> dict:
     camber_gain_heave = slope(heave_mm, camber_bump)
     camber_gain_bump_per25mm = camber_gain_heave * 25.0 if camber_gain_heave is not None else None
     rc_migration_heave = slope(heave_mm, rc_z_bump)
+
+    # Physical front-leg length of the upper wishbone at this candidate -
+    # both the chassis mount (z_up) and the ball joint (KPI-rotated) move,
+    # so this is measured directly from the candidate's own geometry, not
+    # against any fixed CAD reference.
+    hp_left = geometry["hardpoints"]["left"]
+    mount = hp(hp_left, "upper_wishbone_inboard_front")
+    outboard = hp(hp_left, "upper_wishbone_outboard")
+    upper_arm_length = float(np.linalg.norm(np.array(outboard) - np.array(mount)))
+
+    bump_steer_max = span([r.get("roadwheel_angle_left") for r in bump])
+
+    roll = run_sweep(geometry, ROLL_SWEEP)
 
     roll_deg = [r.get("roll") for r in roll]
     camber_l = [r.get("camber_left") for r in roll]
@@ -233,17 +255,6 @@ def evaluate_candidate(geometry: dict) -> dict:
     rc_migration_roll = slope(roll_deg, rc_z_r)
     rc_migration_roll_y = span(rc_y_r)
     roll_steer_front = slope(roll_deg, roadwheel_l)
-
-    # Physical front-leg length of the upper wishbone at this candidate -
-    # both the chassis mount (z_up) and the ball joint (KPI-rotated) move,
-    # so this is measured directly from the candidate's own geometry, not
-    # against any fixed CAD reference.
-    hp_left = geometry["hardpoints"]["left"]
-    mount = hp(hp_left, "upper_wishbone_inboard_front")
-    outboard = hp(hp_left, "upper_wishbone_outboard")
-    upper_arm_length = float(np.linalg.norm(np.array(outboard) - np.array(mount)))
-
-    bump_steer_max = span([r.get("roadwheel_angle_left") for r in bump])
 
     return {
         "camber_static": static.get("camber_left"),

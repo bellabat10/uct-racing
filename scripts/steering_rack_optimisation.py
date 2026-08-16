@@ -93,6 +93,7 @@ import argparse
 import copy
 import math
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -556,6 +557,26 @@ def extract_static_ics(baseline_cad: dict) -> dict:
     }
 
 
+def _evaluate_rack_x_candidate(args: tuple) -> dict:
+    """Top-level (picklable) wrapper for ProcessPoolExecutor.map - one
+    rack_x candidate in, one result row out. Never raises (mirrors
+    mount_kpi_sweep.py's evaluate()): the RuntimeError handling here matches
+    the original serial loop's except clause exactly, so one kinematically
+    infeasible candidate doesn't take the whole pool down."""
+    (rack_x, baseline_cad, x_out, y_out, z_out, fvic_y, fvic_z, svic_x, svic_z,
+     kingpin_lower, kingpin_upper, wheel_center, roll_centre_z_static) = args
+    try:
+        row = evaluate_candidate(
+            baseline_cad, rack_x, x_out, y_out, z_out,
+            fvic_y, fvic_z, svic_x, svic_z,
+            kingpin_lower, kingpin_upper,
+            wheel_center, roll_centre_z_static)
+    except RuntimeError as exc:
+        return {"rack_x_iso": rack_x, "feasible": False, "_error": str(exc)}
+    row["feasible"] = True
+    return row
+
+
 def run_pipeline(rack_x_min: float, rack_x_max: float, steps: int,
                   out_dir: Path) -> tuple[pd.DataFrame, dict]:
     baseline_cad, sw_points = load_baseline()
@@ -586,36 +607,42 @@ def run_pipeline(rack_x_min: float, rack_x_max: float, steps: int,
 
     rack_x_values = np.linspace(rack_x_min, rack_x_max, steps)
 
-    rows = []
+    # A handful of rack-X values in the requested search range are
+    # kinematically infeasible for this practical trackrod_outboard point
+    # (verified: the solver cannot converge the STEER sweep at ANY rack
+    # displacement down to +/-10mm, not just at the full +/-40mm amplitude -
+    # see run_bidirectional_with_fallback's docstring for the
+    # amplitude-only fallback this is distinct from). Each candidate is
+    # independent, so they're evaluated in a process pool, same pattern as
+    # mount_kpi_sweep.py's run_grid() - infeasible candidates are recorded
+    # as a failed row (via _evaluate_rack_x_candidate's own try/except)
+    # rather than crashing the run, so the summary CSV/plots can show
+    # exactly which part of the requested range is usable.
+    worker_args = [
+        (float(rack_x), baseline_cad, x_out, y_out, z_out,
+         ics["fvic_y"], ics["fvic_z"], ics["svic_x"], ics["svic_z"],
+         ics["kingpin_lower"], ics["kingpin_upper"],
+         ics["wheel_center"], ics["roll_centre_z_static"])
+        for rack_x in rack_x_values
+    ]
+    print(f"evaluating {len(worker_args)} rack_x candidates in parallel ...")
+    with ProcessPoolExecutor() as pool:
+        rows = list(pool.map(_evaluate_rack_x_candidate, worker_args, chunksize=4))
+
     n_infeasible = 0
-    for i, rack_x in enumerate(rack_x_values):
-        print(f"  candidate {i+1}/{len(rack_x_values)}: rack_x={rack_x:.1f} ...", end=" ")
-        try:
-            row = evaluate_candidate(
-                baseline_cad, float(rack_x), x_out, y_out, z_out,
-                ics["fvic_y"], ics["fvic_z"], ics["svic_x"], ics["svic_z"],
-                ics["kingpin_lower"], ics["kingpin_upper"],
-                ics["wheel_center"], ics["roll_centre_z_static"])
-        except RuntimeError as exc:
-            # A handful of rack-X values in the requested search range are
-            # kinematically infeasible for this practical trackrod_outboard
-            # point (verified: the solver cannot converge the STEER sweep
-            # at ANY rack displacement down to +/-10mm, not just at the full
-            # +/-40mm amplitude - see run_bidirectional_with_fallback's
-            # docstring for the amplitude-only fallback this is distinct
-            # from. Recorded as a failed row rather than crashing the run,
-            # so the summary CSV/plots can show exactly which part of the
-            # requested -250..-100mm range is usable.
-            print(f"INFEASIBLE ({exc})")
+    for i, row in enumerate(rows):
+        rack_x = row["rack_x_iso"]
+        if row["feasible"]:
+            print(f"  candidate {i+1}/{len(rows)}: rack_x={rack_x:.1f} ... "
+                  f"bump_steer_max={row['bump_steer_max_deg']:.4f} deg, "
+                  f"roll_steer_max={row['roll_steer_max_deg']:.4f} deg, "
+                  f"ackermann={row['ackermann_pct']:.1f}%, "
+                  f"moment_arm={row['moment_arm_mm']:.1f}mm")
+        else:
+            print(f"  candidate {i+1}/{len(rows)}: rack_x={rack_x:.1f} ... "
+                  f"INFEASIBLE ({row.get('_error', '')})")
             n_infeasible += 1
-            rows.append({"rack_x_iso": float(rack_x), "feasible": False})
-            continue
-        row["feasible"] = True
-        rows.append(row)
-        print(f"bump_steer_max={row['bump_steer_max_deg']:.4f} deg, "
-              f"roll_steer_max={row['roll_steer_max_deg']:.4f} deg, "
-              f"ackermann={row['ackermann_pct']:.1f}%, "
-              f"moment_arm={row['moment_arm_mm']:.1f}mm")
+            del row["_error"]
     if n_infeasible:
         print(f"\n{n_infeasible}/{len(rack_x_values)} candidates were kinematically "
               f"infeasible for this trackrod_outboard point - excluded from scoring, "

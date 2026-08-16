@@ -21,7 +21,7 @@ are actually moved in CAD.
 
 Usage:
     python scripts/caster_trail_analysis.py
-    python scripts/caster_trail_analysis.py --geometry outputs/mount_height_kpi_sweep/best_zkpi_geometry.yaml --out-dir outputs/optimal/caster_and_trail
+    python scripts/caster_trail_analysis.py --geometry outputs/front/mount_height_kpi_sweep/best_zkpi_geometry.yaml --out-dir outputs/front/caster_and_trail
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_GEOMETRY_PATH = REPO_ROOT / "configs" / "uct_front_geometry_generated.yaml"
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs"
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "front" / "caster_and_trail"
 
 # Dunlop 155/70R13, free (unloaded) rolling radius. Not stored in the CAD
 # hardpoint file, so it's a named constant here rather than derived from the

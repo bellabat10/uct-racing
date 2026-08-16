@@ -285,7 +285,12 @@ def main() -> None:
     parser.add_argument("--study-dir", type=Path, default=DEFAULT_STUDY_DIR)
     parser.add_argument("--kpi", type=float, required=True)
     parser.add_argument("--caster", type=float, required=True)
+    parser.add_argument("--plots", action="store_true")
     args = parser.parse_args()
+
+    if not args.plots:
+        print("--plots not set, skipping plot generation")
+        return
 
     tag = f"kpi{args.kpi:.1f}_caster{args.caster:.1f}"
     dfs = load_variant_csvs(args.study_dir, tag)

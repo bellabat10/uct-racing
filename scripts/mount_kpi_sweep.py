@@ -65,9 +65,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _sweep_common as sc  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OUTPUT_DIR = REPO_ROOT / "outputs" / "mount_height_kpi_sweep"
+OUTPUT_DIR = REPO_ROOT / "outputs" / "front" / "mount_height_kpi_sweep"
 
 AXLE_POSITION = "front"
+
+# Target scrub radius (mm, positive = kingpin axis meets the ground inboard
+# of the contact patch), hit via a lateral (Y) shift of the kingpin axis
+# endpoints (p, q) applied after the KPI rotation - see build_upright().
+TARGET_SCRUB_RADIUS_MM = 10.0
+
+# Target static camber (deg, solver convention: negative = top of wheel
+# tilts inward), hit via a front-view rotation of axle_inboard/axle_outboard
+# about the wheel centre, applied after the KPI rotation and scrub-radius
+# shift - see build_upright().
+TARGET_CAMBER_DEG = -3.5
 
 _GEOMETRY = sc.load_generated_geometry(AXLE_POSITION)
 _HARDPOINTS = _GEOMETRY["hardpoints"]
@@ -95,6 +106,10 @@ TIRE = {"aspect_ratio": float(_TIRE_CFG["aspect_ratio"]),
         "section_width": float(_TIRE_CFG["section_width"]),
         "rim_diameter": float(_TIRE_CFG["rim_diameter"])}
 WHEEL_OFFSET = float(_GEOMETRY["config"]["wheel"]["offset"] or 0)
+
+from kinematics.core.schema.config import TireConfig  # noqa: E402
+
+TIRE_RADIUS_MM = TireConfig(**TIRE).nominal_radius
 
 # ===========================================================================
 # Rigid-body KPI rotation (front-view Y-Z plane, about q)
@@ -126,17 +141,142 @@ FV_UPRIGHT_LENGTH = math.hypot(_UPPER_OUTBOARD_CAD[1] - LOWER_OUTBOARD[1],
                                 _UPPER_OUTBOARD_CAD[2] - LOWER_OUTBOARD[2])
 
 
+def _wheel_center_from_axle(axle_inboard, axle_outboard) -> tuple[float, float, float]:
+    """Same convention as the solver's own get_wheel_center(): start at the
+    hub face (axle_outboard) and move along the axle axis by WHEEL_OFFSET
+    toward axle_inboard."""
+    ai, ao = np.array(axle_inboard, dtype=float), np.array(axle_outboard, dtype=float)
+    v = ao - ai
+    v = v / np.linalg.norm(v)
+    return tuple(ao - v * WHEEL_OFFSET)
+
+
+def _wheel_plane_down_from_axle(axle_inboard, axle_outboard) -> np.ndarray:
+    """Exact reimplementation of the solver's get_wheel_plane_down_vector()
+    (kinematics.core.points.derived.definitions): the component of global
+    'down' (-Z) orthogonal to the axle (spin axis), via Gram-Schmidt - i.e.
+    'down' as seen within the wheel's own plane, which tilts with camber."""
+    axle_in, axle_out = np.array(axle_inboard, dtype=float), np.array(axle_outboard, dtype=float)
+    axle_dir = axle_out - axle_in
+    axle_dir = axle_dir / np.linalg.norm(axle_dir)
+    global_down = np.array([0.0, 0.0, -1.0])
+    down_parallel = np.dot(global_down, axle_dir) * axle_dir
+    wheel_down = global_down - down_parallel
+    return wheel_down / np.linalg.norm(wheel_down)
+
+
+def _contact_patch_from_axle(axle_inboard, axle_outboard) -> tuple[float, float, float]:
+    """True contact patch centre - matches the solver's own
+    get_contact_patch_center() exactly: wheel centre + tire radius along
+    the wheel-plane 'down' direction. Unlike the wheel centre alone, this
+    accounts for the camber-driven lateral offset (tire_radius *
+    sin(camber)) between the wheel centre and where the tyre actually
+    touches the ground."""
+    wheel_centre = np.array(_wheel_center_from_axle(axle_inboard, axle_outboard))
+    wheel_down = _wheel_plane_down_from_axle(axle_inboard, axle_outboard)
+    return tuple(wheel_centre + wheel_down * TIRE_RADIUS_MM)
+
+
+def _kingpin_ground_intersection_y(p, q) -> float:
+    """Y where the line through q (lower) and p (upper) crosses the world
+    ground plane (Z = 0, ISO) - a simple planar approximation (unlike the
+    solver's own scrub_radius_static, this ignores steer and the contact
+    patch's actual Z height), good enough to pre-position a candidate
+    before the solver's confirmatory re-solve reports the real number."""
+    t = (0.0 - q[2]) / (p[2] - q[2])
+    return q[1] + t * (p[1] - q[1])
+
+
+def _scrub_shift_y(p, q, axle_inboard, axle_outboard, target_scrub_mm: float) -> float:
+    """Lateral (Y) shift to apply to BOTH p and q so the kingpin axis's
+    ground intersection lands target_scrub_mm inboard of the TRUE contact
+    patch centre Y (positive = inboard, matching the solver's scrub-radius
+    sign convention) - not the wheel centre, which ignores the camber-driven
+    offset between the two. A pure Y shift of both endpoints moves the
+    ground intersection Y by that same amount (their Z's - and so the
+    line's ground-crossing parameter t - don't change), so this is a direct
+    closed-form solve, not an iteration."""
+    contact_patch = _contact_patch_from_axle(axle_inboard, axle_outboard)
+    intersection_y = _kingpin_ground_intersection_y(p, q)
+    current_scrub = contact_patch[1] - intersection_y
+    return current_scrub - target_scrub_mm
+
+
+def _camber_from_axle(axle_inboard, axle_outboard, side: float = 1.0) -> float:
+    """Static camber (deg) computed directly from the axle hardpoints - an
+    exact reimplementation of the solver's own calculate_camber()
+    (kinematics.core.metrics.angles), which depends only on wheel_axis
+    (axle_inboard -> axle_outboard) and never references p or q. side=+1.0
+    matches ctx.side_sign for the left corner this file builds. Verified
+    numerically against the real solver's calculate_camber() output on the
+    same geometry."""
+    axle_in, axle_out = np.array(axle_inboard, dtype=float), np.array(axle_outboard, dtype=float)
+    axle = axle_out - axle_in
+    axle = axle / np.linalg.norm(axle)
+    wheel_up = np.cross(axle, np.array([1.0, 0.0, 0.0])) * -side
+    angle = math.atan2(wheel_up[1], wheel_up[2])
+    camber_rad = angle if side > 0 else -angle
+    return math.degrees(camber_rad)
+
+
+def _camber_correction_delta(axle_inboard, axle_outboard, target_camber_deg: float) -> float:
+    """Front-view rotation angle to apply to axle_inboard/axle_outboard
+    (about the wheel centre) so static camber lands on target_camber_deg.
+    Verified numerically: rotating both axle points by +delta via
+    _rotate_about_pivot shifts camber by -delta (that helper's angle sign
+    runs opposite to calculate_camber's), so the needed delta is
+    current - target, not target - current."""
+    current_camber = _camber_from_axle(axle_inboard, axle_outboard)
+    return current_camber - target_camber_deg
+
+
 def build_upright(kpi_deg: float):
     """Rotate all upright-mounted points as a rigid body around q so the
-    kingpin axis (p-q) sits at kpi_deg from vertical. Returns
-    (upper_outboard, trackrod_outboard, axle_inboard, axle_outboard)."""
+    kingpin axis (p-q) sits at kpi_deg from vertical, then rotate
+    axle_inboard/axle_outboard about the wheel centre so static camber hits
+    TARGET_CAMBER_DEG, then shift p and q together laterally (Y) so the
+    kingpin axis hits TARGET_SCRUB_RADIUS_MM of scrub radius - measured
+    against the TRUE contact patch centre, which needs the axle points at
+    their FINAL (post-camber-correction) orientation, since the contact
+    patch moves with camber. Computing the camber correction first (even
+    though it reads as the "second" correction) is what makes the scrub
+    target land on the geometry the solver will actually confirm, instead
+    of one that's about to shift out from under it.
+
+    trackrod_outboard is untouched by either correction.
+    upper/lower_outboard (p, q) move only in the scrub-radius shift - never
+    in the camber correction. axle_inboard/axle_outboard move only in the
+    camber correction - never in the scrub-radius shift.
+
+    KPI is a p-q angle and caster lives in the X-Z plane, so neither
+    correction affects them: the scrub shift moves p and q by an identical
+    Y offset (preserving the p-q angle exactly, and never touching X or Z);
+    the camber correction never moves p or q at all. Static camber, in
+    turn, depends only on axle_inboard/axle_outboard (see
+    _camber_from_axle()) - completely independent of p and q - so rotating
+    just the axle points about the wheel centre (itself invariant under
+    that rotation, since it lies on the line being rotated) changes camber
+    without moving the wheel or perturbing KPI/caster.
+
+    Returns (upper_outboard, lower_outboard, trackrod_outboard,
+    axle_inboard, axle_outboard)."""
     delta = kpi_deg - BASELINE_KPI_DEG
-    return (
-        _rotate_about_pivot(_UPPER_OUTBOARD_CAD, LOWER_OUTBOARD, delta),
-        _rotate_about_pivot(_TRACKROD_OUTBOARD_CAD, LOWER_OUTBOARD, delta),
-        _rotate_about_pivot(_AXLE_INBOARD_CAD, LOWER_OUTBOARD, delta),
-        _rotate_about_pivot(_AXLE_OUTBOARD_CAD, LOWER_OUTBOARD, delta),
-    )
+    upper_outboard = _rotate_about_pivot(_UPPER_OUTBOARD_CAD, LOWER_OUTBOARD, delta)
+    trackrod_outboard = _rotate_about_pivot(_TRACKROD_OUTBOARD_CAD, LOWER_OUTBOARD, delta)
+    axle_inboard = _rotate_about_pivot(_AXLE_INBOARD_CAD, LOWER_OUTBOARD, delta)
+    axle_outboard = _rotate_about_pivot(_AXLE_OUTBOARD_CAD, LOWER_OUTBOARD, delta)
+
+    wheel_centre = _wheel_center_from_axle(axle_inboard, axle_outboard)
+    camber_delta = _camber_correction_delta(axle_inboard, axle_outboard, TARGET_CAMBER_DEG)
+    axle_inboard = _rotate_about_pivot(axle_inboard, wheel_centre, camber_delta)
+    axle_outboard = _rotate_about_pivot(axle_outboard, wheel_centre, camber_delta)
+
+    shift_y = _scrub_shift_y(upper_outboard, LOWER_OUTBOARD, axle_inboard, axle_outboard,
+                              TARGET_SCRUB_RADIUS_MM)
+    lower_outboard = (LOWER_OUTBOARD[0], LOWER_OUTBOARD[1] + shift_y, LOWER_OUTBOARD[2])
+    upper_outboard = (upper_outboard[0], upper_outboard[1] + shift_y, upper_outboard[2])
+
+    return upper_outboard, lower_outboard, trackrod_outboard, axle_inboard, axle_outboard
 
 
 # Z capped at the upright's height at KPI=0 (vertical - the tallest it ever
@@ -144,7 +284,7 @@ def build_upright(kpi_deg: float):
 # per-candidate in build_geometry().
 _Z_CEILING = LOWER_OUTBOARD[2] + FV_UPRIGHT_LENGTH
 Z_RANGE = np.arange(240.0, _Z_CEILING + 1e-9, 10.0)
-KPI_RANGE = np.arange(0.0, 10.0 + 1e-9, 1.0)
+KPI_RANGE = np.arange(5.0, 10.0 + 1e-9, 1.0)
 
 TARGETS_STAGE_A = {k: v for k, v in sc.TARGETS_FULL.items()
                     if k not in ("caster_static", "mechanical_trail_static")}
@@ -192,7 +332,7 @@ BASE_AXLE = {
 def build_geometry(z_up: float, kpi_deg: float) -> dict:
     """Place the upper chassis mount at height z_up and rotate the upright
     rigid body to kpi_deg (degrees from vertical, front view)."""
-    upper_outboard, trackrod_outboard, axle_inboard, axle_outboard = build_upright(kpi_deg)
+    upper_outboard, lower_outboard, trackrod_outboard, axle_inboard, axle_outboard = build_upright(kpi_deg)
 
     if z_up > upper_outboard[2] + 1e-6:
         raise ValueError(
@@ -205,6 +345,7 @@ def build_geometry(z_up: float, kpi_deg: float) -> dict:
     hp["upper_wishbone_inboard_front"] = sc.pt((UPPER_INBOARD_X_FRONT, CHASSIS_MOUNT_Y_FRONT, z_up))
     hp["upper_wishbone_inboard_rear"] = sc.pt((UPPER_INBOARD_X_REAR, CHASSIS_MOUNT_Y_REAR, z_up))
     hp["upper_wishbone_outboard"] = sc.pt(upper_outboard)
+    hp["lower_wishbone_outboard"] = sc.pt(lower_outboard)
     hp["trackrod_outboard"] = sc.pt(trackrod_outboard)
     hp["axle_inboard"] = sc.pt(axle_inboard)
     hp["axle_outboard"] = sc.pt(axle_outboard)
@@ -216,13 +357,14 @@ def write_cad_schema_geometry(path: Path, z_up: float, kpi_deg: float) -> None:
     configs/uct_front_geometry_generated.yaml (flat hardpoints, config
     block) - so scripts/caster_trail_analysis.py's existing point-loading
     code works against it with zero changes beyond the file path."""
-    upper_outboard, trackrod_outboard, axle_inboard, axle_outboard = build_upright(kpi_deg)
+    upper_outboard, lower_outboard, trackrod_outboard, axle_inboard, axle_outboard = build_upright(kpi_deg)
 
     out = copy.deepcopy(_GEOMETRY)
     hp = out["hardpoints"]
     hp["upper_wishbone_inboard_front"] = sc.pt((UPPER_INBOARD_X_FRONT, CHASSIS_MOUNT_Y_FRONT, z_up))
     hp["upper_wishbone_inboard_rear"] = sc.pt((UPPER_INBOARD_X_REAR, CHASSIS_MOUNT_Y_REAR, z_up))
     hp["upper_wishbone_outboard"] = sc.pt(upper_outboard)
+    hp["lower_wishbone_outboard"] = sc.pt(lower_outboard)
     hp["trackrod_outboard"] = sc.pt(trackrod_outboard)
     hp["axle_inboard"] = sc.pt(axle_inboard)
     hp["axle_outboard"] = sc.pt(axle_outboard)
@@ -416,6 +558,8 @@ def render_best(csv_path: str) -> None:
 
 
 def main() -> None:
+    global Z_RANGE, KPI_RANGE
+
     p = argparse.ArgumentParser()
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--detail", nargs=2, type=float, metavar=("Z", "KPI"))
@@ -434,7 +578,45 @@ def main() -> None:
     if a.render_best:
         render_best(a.out); return
 
-    df = run_grid(a.workers)
+    # Two-pass grid search: a coarse pass to find the promising (Z, KPI)
+    # region, then a fine pass confined to that region - much cheaper than
+    # running the fine step size over the whole original range.
+    orig_z_range, orig_kpi_range = Z_RANGE, KPI_RANGE
+    z_lo, z_hi = float(orig_z_range[0]), float(orig_z_range[-1])
+    kpi_lo, kpi_hi = float(orig_kpi_range[0]), float(orig_kpi_range[-1])
+    COARSE_Z_STEP, COARSE_KPI_STEP = 20.0, 2.0
+    FINE_Z_STEP, FINE_KPI_STEP = 5.0, 0.5
+    COST_FILTER_MULTIPLIER = 1.5
+
+    print("=== pass 1/2: coarse grid ===")
+    Z_RANGE = np.arange(z_lo, z_hi + 1e-9, COARSE_Z_STEP)
+    KPI_RANGE = np.arange(kpi_lo, kpi_hi + 1e-9, COARSE_KPI_STEP)
+    coarse_df = run_grid(a.workers)
+    ok = coarse_df[coarse_df.feasible]
+    survivors = (ok[ok.weighted_cost <= ok.weighted_cost.min() * COST_FILTER_MULTIPLIER]
+                 if not ok.empty else ok)
+
+    if survivors.empty:
+        print(f"WARNING: 0/{len(coarse_df)} coarse candidates survived the cost filter - "
+              f"falling back to a single-pass grid search at the original step sizes.")
+        Z_RANGE, KPI_RANGE = orig_z_range, orig_kpi_range
+        df = run_grid(a.workers)
+    else:
+        z_min = max(survivors.z_up.min() - COARSE_Z_STEP, z_lo)
+        z_max = min(survivors.z_up.max() + COARSE_Z_STEP, z_hi)
+        kpi_min = max(survivors.kpi_deg.min() - COARSE_KPI_STEP, kpi_lo)
+        kpi_max = min(survivors.kpi_deg.max() + COARSE_KPI_STEP, kpi_hi)
+        print(f"coarse pass: {len(coarse_df)} candidates evaluated, {len(survivors)} survived "
+              f"(cost <= {COST_FILTER_MULTIPLIER:.1f}x best)")
+        print(f"refined ranges: Z [{z_min:.0f}, {z_max:.0f}] mm, KPI [{kpi_min:.1f}, {kpi_max:.1f}] deg")
+
+        print("=== pass 2/2: fine grid ===")
+        Z_RANGE = np.arange(z_min, z_max + 1e-9, FINE_Z_STEP)
+        KPI_RANGE = np.arange(kpi_min, kpi_max + 1e-9, FINE_KPI_STEP)
+        df = run_grid(a.workers)
+
+    Z_RANGE, KPI_RANGE = orig_z_range, orig_kpi_range
+
     df.to_csv(a.out, index=False)
     print(f"wrote {a.out}")
     report(df)
