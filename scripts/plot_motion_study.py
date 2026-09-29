@@ -30,6 +30,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_STUDY_DIR = REPO_ROOT / "outputs" / "motion_study"
@@ -81,7 +82,28 @@ def _line_panel(ax, df: pd.DataFrame, xcol: str, series: list[tuple[str, str, st
 # Pure steer / steer at fixed roll - 8-panel set + overlay
 # ===========================================================================
 
-def _ackermann_panel(ax, df: pd.DataFrame, track_mm: float, wheelbase_mm: float) -> None:
+def static_track_mm(df: pd.DataFrame) -> float | None:
+    """Track at the sweep's mid step (static, rack centred for pure_steer),
+    from the solver's own `track` metric - None if unavailable."""
+    if not _has(df, "track"):
+        return None
+    value = df["track"].iloc[len(df) // 2]
+    return None if pd.isna(value) else float(value)
+
+
+def variant_wheelbase_mm(study_dir: Path, tag: str) -> float | None:
+    """Wheelbase from the variant geometry motion_study.py saved alongside
+    the CSVs - None if the file or the field is missing."""
+    path = study_dir / "runs" / tag / "variant_geometry.yaml"
+    if not path.exists():
+        return None
+    with open(path) as f:
+        geometry = yaml.safe_load(f) or {}
+    value = (geometry.get("vehicle_config") or {}).get("wheelbase")
+    return float(value) if value is not None else None
+
+
+def _ackermann_panel(ax, df: pd.DataFrame, track_mm: float | None, wheelbase_mm: float | None) -> None:
     if not _has(df, "roadwheel_angle_left", "roadwheel_angle_right"):
         _no_data(ax)
         ax.set_title("Ackermann: left vs right steer", fontsize=9)
@@ -94,9 +116,12 @@ def _ackermann_panel(ax, df: pd.DataFrame, track_mm: float, wheelbase_mm: float)
     ax.plot([lo, hi], [lo, hi], "--", color=COLOR_REF, linewidth=1, label="parallel steer (0%)")
 
     # 100% Ackermann reference: cot(outer) - cot(inner) = track/wheelbase.
-    ideal = track_mm / wheelbase_mm
     span = max(abs(lo), abs(hi))
-    if span > 0.5:
+    if track_mm is None or wheelbase_mm is None:
+        ax.text(0.02, 0.98, "100% Ackermann reference unavailable\n(no track or wheelbase)",
+                transform=ax.transAxes, va="top", fontsize=7, color=COLOR_REF)
+    elif span > 0.5:
+        ideal = track_mm / wheelbase_mm
         inner_mag = np.linspace(0.5, span, 60)
         with np.errstate(divide="ignore", invalid="ignore"):
             outer_mag = np.degrees(np.arctan(1.0 / (1.0 / np.tan(np.radians(inner_mag)) - ideal)))
@@ -132,7 +157,8 @@ def _contact_patch_panel(ax, df: pd.DataFrame) -> None:
 
 
 def plot_pure_steer(df_steer: pd.DataFrame, variant_label: str, out_path: Path,
-                     track_mm: float = 1200.0, wheelbase_mm: float = 1625.0) -> None:
+                     wheelbase_mm: float | None) -> None:
+    track_mm = static_track_mm(df_steer)
     fig, axes = plt.subplots(2, 4, figsize=(22, 10), constrained_layout=True)
 
     _line_panel(axes[0, 0], df_steer, STEER_X_COL,
@@ -175,8 +201,7 @@ def plot_pure_steer(df_steer: pd.DataFrame, variant_label: str, out_path: Path,
 
 
 def plot_steer_vs_fixed_roll_overlay(df_steer: pd.DataFrame, df_fixed_roll: pd.DataFrame,
-                                      variant_label: str, out_path: Path,
-                                      track_mm: float = 1200.0, wheelbase_mm: float = 1625.0) -> None:
+                                      variant_label: str, out_path: Path) -> None:
     """Solid = pure_steer, dashed = steer_at_fixed_roll. The difference
     between them is how much roll corrupts the steering geometry."""
     fig, axes = plt.subplots(1, 3, figsize=(17, 5.5), constrained_layout=True)
@@ -304,7 +329,8 @@ def main() -> None:
     df_steer = dfs.get("pure_steer")
     df_fixed_roll = dfs.get("steer_at_fixed_roll")
     if df_steer is not None:
-        plot_pure_steer(df_steer, tag, out_dir / f"{tag}_pure_steer.png")
+        plot_pure_steer(df_steer, tag, out_dir / f"{tag}_pure_steer.png",
+                        variant_wheelbase_mm(args.study_dir, tag))
         if df_fixed_roll is not None:
             plot_steer_vs_fixed_roll_overlay(
                 df_steer, df_fixed_roll, tag, out_dir / f"{tag}_pure_steer_vs_fixed_roll.png"

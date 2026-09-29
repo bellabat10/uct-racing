@@ -1,48 +1,51 @@
 """
 Plots for scripts/steering_rack_optimisation.py.
 
-Reads outputs/steering_rack_optimisation/summary.csv (+ the best_candidate/
-sweep CSVs and geometry.yaml the main script also writes) and produces:
+Reads a run folder (default outputs/front/steering_rack_optimisation/):
+summary.csv plus best_candidate/bump_sweep.csv and roll_sweep.csv, and writes
+into the same folder:
 
-  outputs/steering_rack_optimisation_summary.png    - 6-panel candidate sweep
-  outputs/best_candidate_bump_steer.png
-  outputs/best_candidate_roll_steer.png
-  outputs/best_candidate_ackermann.png
-  outputs/best_candidate_front_view.png
+  summary.png                      - bump steer, roll steer slope, peak toe
+                                     change in roll, max steer angle and
+                                     steering ratio vs steering arm inset,
+                                     target bands shaded
+  best_candidate/bump_steer.png    - recommended candidate's toe vs wheel travel
+  best_candidate/roll_steer.png    - recommended candidate's toe vs chassis roll
+
+Target values come from scripts/steering_rack_optimisation.py (which reads
+them from _sweep_common.TARGETS_FULL), so the shaded bands always match the
+PASS/FAIL rule in summary.csv.
 
 Run scripts/steering_rack_optimisation.py first.
 
 Usage:
     python scripts/plot_steering_rack_optimisation.py
+    python scripts/plot_steering_rack_optimisation.py --run-dir outputs/front/steering_rack_optimisation/smoke
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import yaml
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import steering_rack_optimisation as m  # noqa: E402
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-RUN_DIR = REPO_ROOT / "outputs" / "steering_rack_optimisation"
-OUT_DIR = REPO_ROOT / "outputs"
-
-# Palette (colour-blind-safe categorical set + green/amber/red status bands)
-C_PRIMARY = "#3B82C4"
-C_SECONDARY = "#D9782D"
-C_TERTIARY = "#5FA05C"
-C_GOOD = "#2E7D46"
-C_WARN = "#B8860B"
-GOOD_BAND = "#2E7D4622"
-WARN_BAND = "#B8860B22"
-C_RECOMMENDED = "#7A4FA3"
-C_INFEASIBLE = "#B0B0B0"
+C_SERIES = "#2a78d6"        # the one data series per panel
+C_TARGET_BAND = "#1baf7a"   # target / acceptable region
+C_REJECTED = "#9a9892"      # infeasible or hard-rejected candidates
+C_RECOMMENDED = "#0b0b0b"
+C_TEXT_MUTED = "#52514e"
 
 
 def _style_axes(ax):
@@ -51,124 +54,172 @@ def _style_axes(ax):
     ax.grid(True, alpha=0.25, linewidth=0.6)
 
 
-def load_summary() -> pd.DataFrame:
-    df = pd.read_csv(RUN_DIR / "summary.csv")
-    return df
+def load_summary(run_dir: Path) -> pd.DataFrame:
+    path = run_dir / "summary.csv"
+    if not path.exists():
+        sys.exit(f"ERROR: {path} not found - run scripts/steering_rack_optimisation.py first.")
+    df = pd.read_csv(path)
+    df["feasible"] = df["feasible"].astype(bool)
+    return df.sort_values("arm_inset_mm").reset_index(drop=True)
 
 
-def recommended_rack_x(df: pd.DataFrame) -> float:
-    feasible = df[df["feasible"]]
-    return float(feasible.loc[feasible["score"].idxmin(), "rack_x_iso"])
+def recommended_row(df: pd.DataFrame) -> pd.Series | None:
+    """Same rule as the optimiser: lowest cost among scored candidates
+    (cost is NaN for infeasible and hard-rejected ones)."""
+    scored = df[df["cost"].notna()]
+    return None if scored.empty else scored.loc[scored["cost"].idxmin()]
+
+
+def _travel_label(feasible: pd.DataFrame, col: str) -> str:
+    """The travel actually solved, e.g. '25', or '10-25' if some candidates
+    fell back to less travel."""
+    values = feasible[col].dropna().unique()
+    if len(values) == 0:
+        return "?"
+    if len(values) == 1:
+        return f"{values[0]:g}"
+    return f"{min(values):g}-{max(values):g}"
 
 
 # ===========================================================================
-# 6-panel summary figure
+# Summary figure
 # ===========================================================================
 
 def plot_summary(df: pd.DataFrame, out_path: Path) -> None:
-    rec_x = recommended_rack_x(df)
-    feasible = df[df["feasible"]].sort_values("rack_x_iso")
-    infeasible = df[~df["feasible"]]
+    feasible = df[df["feasible"]]
+    rejected_x = df.loc[~df["feasible"] | (df["feasible"] & (df["max_steer_angle_deg"] < m.MIN_STEER_ANGLE_DEG)),
+                        "arm_inset_mm"]
+    best = recommended_row(df)
+    x = feasible["arm_inset_mm"]
 
-    fig, axes = plt.subplots(3, 2, figsize=(13, 13))
-    fig.suptitle("Steering rack / tie-rod optimisation - rack-X candidate sweep",
-                 fontsize=13, fontweight="bold")
-    x = feasible["rack_x_iso"]
+    # Grey band per rejected candidate: half the candidate spacing (so a 5mm
+    # sweep tiles exactly), capped so a sparse --smoke run doesn't grey out
+    # whole stretches of the axis that were never evaluated.
+    steps = np.diff(df["arm_inset_mm"].to_numpy())
+    half_width = min(0.5 * float(np.min(steps)), 5.0) if len(steps) else 2.5
 
-    def mark_infeasible(ax):
-        for xv in infeasible["rack_x_iso"]:
-            ax.axvspan(xv - 2.5, xv + 2.5, color=C_INFEASIBLE, alpha=0.35, zorder=0)
+    # Top axis: true steering arm length at the same candidates (monotonic in
+    # inset). Linear extrapolation past the ends so the axis doesn't clamp.
+    inset_all = df["arm_inset_mm"].to_numpy(dtype=float)
+    length_all = df["steering_arm_length_mm"].to_numpy(dtype=float)
 
-    def mark_recommended(ax):
-        ax.axvline(rec_x, color=C_RECOMMENDED, linestyle="--", linewidth=1.6, zorder=5,
-                   label=f"recommended ({rec_x:.0f}mm)")
+    def _interp_extrap(v, xp, fp):
+        v = np.asarray(v, dtype=float)
+        out = np.interp(v, xp, fp)
+        if len(xp) >= 2:
+            lo_slope = (fp[1] - fp[0]) / (xp[1] - xp[0])
+            hi_slope = (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
+            out = np.where(v < xp[0], fp[0] + (v - xp[0]) * lo_slope, out)
+            out = np.where(v > xp[-1], fp[-1] + (v - xp[-1]) * hi_slope, out)
+        return out
 
-    # Panel 1: bump steer
+    def inset_to_length(v):
+        return _interp_extrap(v, inset_all, length_all)
+
+    def length_to_inset(v):
+        return _interp_extrap(v, length_all, inset_all)
+
+    bump_label = _travel_label(feasible, "bump_travel_used_mm")
+    droop_label = _travel_label(feasible, "droop_travel_used_mm")
+    roll_label = f"{feasible['roll_max_deg'].max():.1f}" if not feasible.empty else "?"
+
+    fig, axes = plt.subplots(2, 3, figsize=(17, 9.5), sharex=True)
+    offset = float(df["steering_arm_rearward_offset_mm"].iloc[0])
+    placeholder = " (PLACEHOLDER)" if m.RACK_HALF_STROKE_IS_PLACEHOLDER else ""
+    fig.suptitle(
+        "Steering rack optimisation - candidates vs steering arm inset\n"
+        f"rack z = {df['trackrod_inboard_z'].dropna().iloc[0]:.1f} mm, "
+        f"rearward offset = {offset:.0f} mm, rack half-stroke = {m.RACK_HALF_STROKE_MM:.0f} mm{placeholder}",
+        fontsize=12)
+
+    def decorate(ax, title, ylabel):
+        for xv in rejected_x:
+            ax.axvspan(xv - half_width, xv + half_width, color=C_REJECTED, alpha=0.18, lw=0, zorder=0)
+        if best is not None:
+            ax.axvline(best["arm_inset_mm"], color=C_RECOMMENDED, linestyle="--", linewidth=1.2, zorder=5)
+        ax.set_title(title, fontsize=10.5, loc="left")
+        ax.set_ylabel(ylabel)
+        _style_axes(ax)
+
+    def plot_series(ax, col):
+        ax.plot(x, feasible[col], "o-", color=C_SERIES, linewidth=2, markersize=4, zorder=4)
+
+    # Bump steer
     ax = axes[0, 0]
-    ax.axhspan(0, m.BUMP_STEER_TARGET, color=C_GOOD, alpha=0.15)
-    ax.axhspan(m.BUMP_STEER_TARGET, m.BUMP_STEER_ACCEPT, color=C_WARN, alpha=0.12)
-    ax.plot(x, feasible["bump_steer_max_deg"], "o-", color=C_PRIMARY, label="max")
-    ax.plot(x, feasible["bump_steer_rms_deg"], "s--", color=C_SECONDARY, label="rms", markersize=4)
-    mark_infeasible(ax)
-    mark_recommended(ax)
-    ax.set_title("Bump steer vs rack X")
-    ax.set_ylabel("toe change, deg")
-    ax.legend(fontsize=8, loc="best")
-    _style_axes(ax)
+    ax.axhspan(0, m.BUMP_STEER_TARGET, color=C_TARGET_BAND, alpha=0.18, lw=0,
+               label=f"target <= {m.BUMP_STEER_TARGET:g} deg")
+    plot_series(ax, "bump_steer_deg")
+    decorate(ax, f"Bump steer (toe range, -{droop_label} / +{bump_label} mm travel)", "deg")
+    ax.set_ylim(bottom=0)
 
-    # Panel 2: roll steer
+    # Roll steer slope (scored)
     ax = axes[0, 1]
-    ax.axhspan(0, m.ROLL_STEER_TARGET, color=C_GOOD, alpha=0.15)
-    ax.axhspan(m.ROLL_STEER_TARGET, m.ROLL_STEER_ACCEPT, color=C_WARN, alpha=0.12)
-    ax.plot(x, feasible["roll_steer_max_deg"], "o-", color=C_PRIMARY, label="max")
-    ax.plot(x, feasible["roll_steer_at_1deg_roll"].abs(), "s--", color=C_SECONDARY,
-            label="|at 1deg roll|", markersize=4)
-    mark_infeasible(ax)
-    mark_recommended(ax)
-    ax.set_title("Roll steer vs rack X")
-    ax.set_ylabel("toe change, deg")
-    ax.legend(fontsize=8, loc="best")
-    _style_axes(ax)
+    ax.axhspan(-m.ROLL_STEER_TARGET, m.ROLL_STEER_TARGET, color=C_TARGET_BAND, alpha=0.18, lw=0,
+               label=f"target +/-{m.ROLL_STEER_TARGET:g} deg/deg")
+    ax.axhline(0, color=C_TEXT_MUTED, linewidth=0.8)
+    plot_series(ax, "roll_steer_slope_deg_per_deg")
+    decorate(ax, "Roll steer slope (scored)", "deg toe / deg roll")
 
-    # Panel 3: Ackermann
+    # Peak toe change in roll (reported only)
+    ax = axes[0, 2]
+    ax.axhline(0, color=C_TEXT_MUTED, linewidth=0.8)
+    plot_series(ax, "roll_toe_change_peak_deg")
+    decorate(ax, f"Peak toe change in roll, +/-{roll_label} deg (reported only)", "deg")
+
+    # Max steer angle
     ax = axes[1, 0]
-    ax.axhspan(m.ACKERMANN_LO, m.ACKERMANN_HI, color=C_GOOD, alpha=0.15)
-    ax.axhline(m.ACKERMANN_NOMINAL, color=C_GOOD, linestyle=":", linewidth=1.2)
-    ax.plot(x, feasible["ackermann_pct"], "o-", color=C_PRIMARY, label="geometric (quick)")
-    ax.plot(x, feasible["ackermann_pct_steer_validated"], "s--", color=C_SECONDARY,
-            label="steer-sweep-validated", markersize=4)
-    mark_infeasible(ax)
-    mark_recommended(ax)
-    ax.set_title("Ackermann % vs rack X")
-    ax.set_ylabel("Ackermann, %")
-    ax.legend(fontsize=8, loc="best")
-    _style_axes(ax)
+    plot_series(ax, "max_steer_angle_deg")
+    top = max(float(feasible["max_steer_angle_deg"].max()) * 1.08, m.MIN_STEER_ANGLE_DEG * 1.2)
+    ax.axhspan(m.MIN_STEER_ANGLE_DEG, top, color=C_TARGET_BAND, alpha=0.18, lw=0,
+               label=f">= {m.MIN_STEER_ANGLE_DEG:g} deg required")
+    ax.set_ylim(0, top)
+    decorate(ax, f"Max steer angle = ratio x {m.RACK_HALF_STROKE_MM:g} mm half-stroke{placeholder.lower()}",
+             "deg")
 
-    # Panel 4: moment arm
+    # Steering ratio - reported only, no target
     ax = axes[1, 1]
-    ax.axhspan(m.MOMENT_ARM_LO, m.MOMENT_ARM_HI, color=C_GOOD, alpha=0.15)
-    ax.plot(x, feasible["moment_arm_mm"], "o-", color=C_PRIMARY)
-    mark_infeasible(ax)
-    mark_recommended(ax)
-    ax.set_title("Steering moment arm vs rack X")
-    ax.set_ylabel("moment arm, mm")
-    _style_axes(ax)
+    plot_series(ax, "steering_ratio_deg_per_mm")
+    decorate(ax, "Steering ratio (reported only)", "deg / mm of rack")
 
-    # Panel 5: tie rod geometry (twin axes)
-    ax = axes[2, 0]
-    l1, = ax.plot(x, feasible["tie_rod_length"], "o-", color=C_PRIMARY, label="length")
-    ax.set_ylabel("tie rod length, mm", color=C_PRIMARY)
-    ax.tick_params(axis="y", labelcolor=C_PRIMARY)
-    ax2 = ax.twinx()
-    l2, = ax2.plot(x, feasible["elevation_angle_deg"], "s--", color=C_SECONDARY,
-                    label="elevation angle", markersize=4)
-    ax2.set_ylabel("elevation angle, deg", color=C_SECONDARY)
-    ax2.tick_params(axis="y", labelcolor=C_SECONDARY)
-    mark_infeasible(ax)
-    mark_recommended(ax)
-    ax.set_title("Tie rod geometry vs rack X")
-    ax.legend([l1, l2], ["length", "elevation angle"], fontsize=8, loc="best")
-    _style_axes(ax)
-    ax2.grid(False)
+    for ax in (axes[0, 0], axes[0, 1], axes[1, 0]):
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(handles, labels, fontsize=8, loc="best", frameon=False)
 
-    # Panel 6: IC alignment quality
-    ax = axes[2, 1]
-    ax.plot(x, feasible["fvic_alignment_error_mm"], "o-", color=C_PRIMARY, label="FVIC error", markersize=4)
-    ax.plot(x, feasible["svic_alignment_error_mm"], "s-", color=C_SECONDARY, label="SVIC error", markersize=4)
-    ax.plot(x, feasible["z_consistency_error_mm"].abs(), "^-", color=C_TERTIARY,
-            label="|z consistency error|", markersize=4)
-    mark_infeasible(ax)
-    mark_recommended(ax)
-    ax.set_title("IC alignment quality vs rack X")
-    ax.set_ylabel("error, mm")
-    ax.set_yscale("symlog", linthresh=1.0)
-    ax.legend(fontsize=8, loc="best")
-    _style_axes(ax)
+    for ax in axes[1, :2]:
+        ax.set_xlabel("steering arm inset, mm (lateral, inboard of kingpin axis)")
+    axes[0, 2].tick_params(labelbottom=True)
+    axes[0, 2].set_xlabel("steering arm inset, mm")
+    for ax in axes[0, :]:
+        sec = ax.secondary_xaxis("top", functions=(inset_to_length, length_to_inset))
+        sec.set_xlabel("true steering arm length, mm", fontsize=9, color=C_TEXT_MUTED)
+        sec.tick_params(labelsize=8, colors=C_TEXT_MUTED)
 
-    for ax in axes[-1, :]:
-        ax.set_xlabel("rack X (ISO), mm")
+    # Sixth panel: shared legend + the recommended candidate's numbers.
+    ax = axes[1, 2]
+    ax.axis("off")
+    handles = [Patch(color=C_TARGET_BAND, alpha=0.35, label="target / required region"),
+               Patch(color=C_REJECTED, alpha=0.35,
+                     label=f"infeasible or < {m.MIN_STEER_ANGLE_DEG:g} deg (not scored)")]
+    if best is not None:
+        handles.append(Line2D([], [], color=C_RECOMMENDED, linestyle="--", label="recommended candidate"))
+    ax.legend(handles=handles, loc="upper left", fontsize=9, frameon=False)
+    if best is not None:
+        lines = [
+            f"Recommended: inset {best['arm_inset_mm']:.0f} mm  ({best['pass_fail']})",
+            f"true steering arm length   {best['steering_arm_length_mm']:.1f} mm",
+            f"bump steer                 {best['bump_steer_deg']:.3f} deg",
+            f"roll steer slope           {best['roll_steer_slope_deg_per_deg']:+.4f} deg/deg",
+            f"peak toe change in roll    {best['roll_toe_change_peak_deg']:+.3f} deg",
+            f"max steer angle            {best['max_steer_angle_deg']:.1f} deg",
+            f"steering ratio             {best['steering_ratio_deg_per_mm']:.3f} deg/mm",
+        ]
+    else:
+        lines = ["No scored candidate - every one was infeasible or under",
+                 f"{m.MIN_STEER_ANGLE_DEG:g} deg max steer angle."]
+    ax.text(0.0, 0.62, "\n".join(lines), transform=ax.transAxes, va="top", ha="left",
+            fontsize=9.5, family="monospace", color=C_RECOMMENDED)
 
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"wrote {out_path}")
@@ -178,146 +229,46 @@ def plot_summary(df: pd.DataFrame, out_path: Path) -> None:
 # Best-candidate detail plots
 # ===========================================================================
 
-def plot_bump_steer(df_bump: pd.DataFrame, out_path: Path) -> None:
+def plot_bump_steer(df_bump: pd.DataFrame, best: pd.Series, out_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(7, 5))
-    travel = df_bump["wheel_travel_left"]
-    toe = df_bump["roadwheel_angle_left"]
-    mid_toe = toe.iloc[len(toe) // 2]
-    toe_rel = toe - mid_toe
-    ax.axhspan(-m.BUMP_STEER_TARGET, m.BUMP_STEER_TARGET, color=C_GOOD, alpha=0.15, label="target")
-    ax.axhspan(-m.BUMP_STEER_ACCEPT, -m.BUMP_STEER_TARGET, color=C_WARN, alpha=0.12)
-    ax.axhspan(m.BUMP_STEER_TARGET, m.BUMP_STEER_ACCEPT, color=C_WARN, alpha=0.12, label="acceptable")
-    ax.plot(travel, toe_rel, "o-", color=C_PRIMARY, markersize=3)
-    ax.axvline(0, color="grey", linewidth=0.8)
+    travel = df_bump["wheel_travel_left"].to_numpy(dtype=float)
+    toe = df_bump["roadwheel_angle_left"].to_numpy(dtype=float)
+    toe_rel = toe - toe[int(np.argmin(np.abs(travel)))]
+    ax.plot(travel, toe_rel, "o-", color=C_SERIES, linewidth=2, markersize=3)
+    ax.axvline(0, color=C_TEXT_MUTED, linewidth=0.8)
+    ax.axhline(0, color=C_TEXT_MUTED, linewidth=0.8)
     _style_axes(ax)
     ax.set_xlabel("wheel travel, mm (+ bump / - droop)")
     ax.set_ylabel("toe change from static, deg")
-    ax.set_title("Best candidate - bump steer")
-    ax.legend(fontsize=8)
+    ax.set_title(f"Recommended candidate (inset {best['arm_inset_mm']:.0f} mm) - bump steer\n"
+                 f"toe range {best['bump_steer_deg']:.3f} deg, target <= {m.BUMP_STEER_TARGET:g} deg",
+                 fontsize=11)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"wrote {out_path}")
 
 
-def plot_roll_steer(df_roll: pd.DataFrame, out_path: Path) -> None:
+def plot_roll_steer(df_roll: pd.DataFrame, best: pd.Series, out_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(7, 5))
-    roll = df_roll["roll"]
-    toe = df_roll["roadwheel_angle_left"]
-    mid_toe = toe.iloc[len(toe) // 2]
-    toe_rel = toe - mid_toe
-    ax.axhspan(-m.ROLL_STEER_TARGET, m.ROLL_STEER_TARGET, color=C_GOOD, alpha=0.15, label="target")
-    ax.axhspan(-m.ROLL_STEER_ACCEPT, -m.ROLL_STEER_TARGET, color=C_WARN, alpha=0.12)
-    ax.axhspan(m.ROLL_STEER_TARGET, m.ROLL_STEER_ACCEPT, color=C_WARN, alpha=0.12, label="acceptable")
-    ax.plot(roll, toe_rel, "o-", color=C_PRIMARY, markersize=3)
-    ax.axvline(0, color="grey", linewidth=0.8)
+    roll = df_roll["roll"].to_numpy(dtype=float)
+    toe = df_roll["roadwheel_angle_left"].to_numpy(dtype=float)
+    toe_rel = toe - toe[int(np.argmin(np.abs(roll)))]
+    order = np.argsort(roll)
+    r = roll[order]
+    ax.fill_between(r, -m.ROLL_STEER_TARGET * np.abs(r), m.ROLL_STEER_TARGET * np.abs(r),
+                    color=C_TARGET_BAND, alpha=0.18, lw=0,
+                    label=f"slope within +/-{m.ROLL_STEER_TARGET:g} deg/deg")
+    ax.plot(roll, toe_rel, "o-", color=C_SERIES, linewidth=2, markersize=3)
+    ax.axvline(0, color=C_TEXT_MUTED, linewidth=0.8)
+    ax.axhline(0, color=C_TEXT_MUTED, linewidth=0.8)
     _style_axes(ax)
     ax.set_xlabel("chassis roll, deg")
     ax.set_ylabel("toe change from static, deg")
-    ax.set_title("Best candidate - roll steer")
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"wrote {out_path}")
-
-
-def plot_ackermann(df_steer: pd.DataFrame, out_path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(7, 5))
-    outer = df_steer["roadwheel_angle_right"]   # right = outer for a left-hand-lock convention
-    inner = -df_steer["roadwheel_angle_left"]
-    order = np.argsort(outer.to_numpy())
-    outer_s, inner_s = outer.to_numpy()[order], inner.to_numpy()[order]
-
-    ax.plot(outer_s, inner_s, "o-", color=C_PRIMARY, markersize=3, label="actual (solver)")
-    ax.plot(outer_s, outer_s, "--", color="grey", linewidth=1.2, label="parallel steer (0%)")
-
-    track_mm, wheelbase_mm = m.TRACK_MM, m.WHEELBASE_MM
-    outer_rad = np.radians(np.abs(outer_s))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ideal_inner = np.degrees(np.arctan(
-            1.0 / (1.0 / np.tan(np.where(outer_rad == 0, np.nan, outer_rad)) - track_mm / wheelbase_mm)))
-    ax.plot(outer_s, np.sign(outer_s) * np.abs(ideal_inner), ":", color=C_GOOD, linewidth=1.4,
-            label="100% Ackermann")
-
-    _style_axes(ax)
-    ax.set_xlabel("outer wheel steer angle, deg")
-    ax.set_ylabel("inner wheel steer angle, deg")
-    ax.set_title("Best candidate - Ackermann (steer sweep)")
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"wrote {out_path}")
-
-
-def plot_front_view(geometry_cad: dict, detail: dict, out_path: Path) -> None:
-    hp = geometry_cad["hardpoints"]
-
-    def yz(name):
-        p = hp[name]
-        return p["y"], p["z"]
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-
-    # Wishbones (front view: Y-Z plane)
-    lwo = yz("lower_wishbone_outboard")
-    uwo = yz("upper_wishbone_outboard")
-    for inb_name, outb, color, label in [
-        ("lower_wishbone_inboard_front", lwo, C_PRIMARY, "lower wishbone"),
-        ("lower_wishbone_inboard_rear", lwo, C_PRIMARY, None),
-        ("upper_wishbone_inboard_front", uwo, C_SECONDARY, "upper wishbone"),
-        ("upper_wishbone_inboard_rear", uwo, C_SECONDARY, None),
-    ]:
-        inb = yz(inb_name)
-        ax.plot([inb[0], outb[0]], [inb[1], outb[1]], "-", color=color, linewidth=2, label=label)
-
-    # FVIC and dashed extensions of wishbone lines through it
-    ics = detail["ics"]
-    fvic = (ics["fvic_y"], ics["fvic_z"])
-    for inb_name, outb, color in [
-        ("lower_wishbone_inboard_front", lwo, C_PRIMARY),
-        ("upper_wishbone_inboard_front", uwo, C_SECONDARY),
-    ]:
-        inb = yz(inb_name)
-        ax.plot([fvic[0], inb[0]], [fvic[1], inb[1]], "--", color=color, linewidth=1, alpha=0.6)
-    ax.plot(*fvic, "*", color="black", markersize=14, label="FVIC", zorder=6)
-
-    # Tie rod + FVIC line overlay
-    trackrod_in = yz("trackrod_inboard")
-    trackrod_out = yz("trackrod_outboard")
-    ax.plot([trackrod_in[0], trackrod_out[0]], [trackrod_in[1], trackrod_out[1]],
-            "-", color=C_TERTIARY, linewidth=2.5, label="tie rod", zorder=5)
-    # FVIC line overlaid on tie rod (extend from FVIC through inboard, well past outboard)
-    dv = np.array(trackrod_in) - np.array(fvic)
-    far = np.array(fvic) + dv * 1.15
-    ax.plot([fvic[0], far[0]], [fvic[1], far[1]], ":", color="black", linewidth=1.2,
-            label="FVIC line (should coincide with tie rod)", zorder=4)
-
-    # Wheel outline (circle at wheel centre, front view)
-    axle_in = yz("axle_inboard")
-    axle_out = yz("axle_outboard")
-    wheel_y = 0.5 * (axle_in[0] + axle_out[0])
-    wheel_z = 0.5 * (axle_in[1] + axle_out[1])
-    theta = np.linspace(0, 2 * np.pi, 100)
-    tire = geometry_cad["config"]["wheel"]["tire"]
-    free_radius = (tire["rim_diameter"] * 25.4 / 2.0) + tire["section_width"] * tire["aspect_ratio"]
-    ax.plot(wheel_y + free_radius * np.cos(theta), wheel_z + free_radius * np.sin(theta),
-            "-", color="grey", linewidth=1, label="wheel")
-
-    # Ground line
-    ax.axhline(0, color="black", linewidth=1)
-
-    ax.plot(*trackrod_in, "o", color=C_TERTIARY, markersize=6)
-    ax.plot(*trackrod_out, "o", color=C_TERTIARY, markersize=6)
-
-    ax.set_xlabel("y (ISO, left), mm")
-    ax.set_ylabel("z (ISO, up), mm")
-    ax.set_title("Best candidate - front view (FVIC / tie-rod alignment)")
-    ax.set_aspect("equal", adjustable="datalim")
-    ax.legend(fontsize=8, loc="upper left")
-    _style_axes(ax)
-    fig = ax.figure
+    ax.set_title(f"Recommended candidate (inset {best['arm_inset_mm']:.0f} mm) - roll steer\n"
+                 f"slope {best['roll_steer_slope_deg_per_deg']:+.4f} deg/deg, "
+                 f"peak toe change {best['roll_toe_change_peak_deg']:+.3f} deg", fontsize=11)
+    ax.legend(fontsize=8, frameon=False)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -329,24 +280,22 @@ def plot_front_view(geometry_cad: dict, detail: dict, out_path: Path) -> None:
 # ===========================================================================
 
 def main() -> None:
-    df = load_summary()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    plot_summary(df, OUT_DIR / "steering_rack_optimisation_summary.png")
+    parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    parser.add_argument("--run-dir", type=Path, default=m.DEFAULT_OUTPUT_DIR,
+                        help="folder holding summary.csv and best_candidate/ "
+                             f"(default {m.DEFAULT_OUTPUT_DIR})")
+    args = parser.parse_args()
 
-    detail_dir = RUN_DIR / "best_candidate"
-    bump = pd.read_csv(detail_dir / "bump_sweep.csv")
-    roll = pd.read_csv(detail_dir / "roll_sweep.csv")
-    steer = pd.read_csv(detail_dir / "steer_sweep.csv")
-    with open(detail_dir / "geometry.yaml") as f:
-        geometry_cad = yaml.safe_load(f)
+    df = load_summary(args.run_dir)
+    plot_summary(df, args.run_dir / "summary.png")
 
-    plot_bump_steer(bump, OUT_DIR / "best_candidate_bump_steer.png")
-    plot_roll_steer(roll, OUT_DIR / "best_candidate_roll_steer.png")
-    plot_ackermann(steer, OUT_DIR / "best_candidate_ackermann.png")
-
-    baseline_cad, _ = m.load_baseline()
-    ics = m.extract_static_ics(baseline_cad)
-    plot_front_view(geometry_cad, {"ics": ics}, OUT_DIR / "best_candidate_front_view.png")
+    best = recommended_row(df)
+    detail_dir = args.run_dir / "best_candidate"
+    if best is None or not (detail_dir / "bump_sweep.csv").exists():
+        print("no recommended candidate / best_candidate sweeps - skipping detail plots")
+        return
+    plot_bump_steer(pd.read_csv(detail_dir / "bump_sweep.csv"), best, detail_dir / "bump_steer.png")
+    plot_roll_steer(pd.read_csv(detail_dir / "roll_sweep.csv"), best, detail_dir / "roll_steer.png")
 
 
 if __name__ == "__main__":

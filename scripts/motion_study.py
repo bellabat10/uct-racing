@@ -62,6 +62,7 @@ import pandas as pd
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _steering_config  # noqa: E402
 import _sweep_common as sc  # noqa: E402
 
 from kinematics.cli.visualization.main import build_render_model  # noqa: E402
@@ -77,18 +78,19 @@ DEFAULT_OUTPUT_DIR = REPO_ROOT / "outputs" / "motion_study"
 # ===========================================================================
 
 HEAVE_MM = 30.0   # +/- mm, symmetric bump/droop
-ROLL_MM = 25.0    # +/- mm per wheel, opposed (~2.4 deg roll at 1200mm track)
-RACK_MM = 40.0    # PLACEHOLDER - confirm the real lock-to-lock half-stroke
-                  # with the steering team. Anything near the ends of a
-                  # steer sweep is untrustworthy until that number is real.
-                  # Shares this placeholder value with RACK_STEER_HALF_STROKE_MM
-                  # in scripts/steering_rack_optimisation.py - update both
-                  # together, never just one.
+ROLL_MM = 25.0    # +/- mm per wheel, opposed (~2.4 deg roll on this car's track)
+
+# Rack half-stroke (centre to full lock), mm - PLACEHOLDER. Single source of
+# truth is configs/steering_rack.yaml (shared with
+# scripts/steering_rack_optimisation.py); edit it there, not here. Anything
+# near the ends of a steer sweep is untrustworthy until that number is real.
+RACK_MM = _steering_config.rack_half_stroke_mm()
 
 STEPS_TRAVEL = 61  # heave/roll/single-wheel-bump motions (steps.py must be odd for a static step)
 STEPS_STEER = 81   # any motion where the rack value changes across the sweep
 
-BUMP_STEER_FAMILY_RACK_VALUES = (-40.0, -20.0, 0.0, 20.0, 40.0)
+# Full lock left, half lock, centre, half lock, full lock right - follows RACK_MM.
+BUMP_STEER_FAMILY_RACK_VALUES = tuple(float(v) for v in np.linspace(-RACK_MM, RACK_MM, 5))
 
 
 def _axle_sweep(steps: int, left_z=(0.0, 0.0), right_z=(0.0, 0.0),
@@ -309,10 +311,18 @@ def add_track_change_column(df: pd.DataFrame) -> pd.Series:
     return df["track"] - df["track"].iloc[mid]
 
 
-def ackermann_pct_row(roadwheel_angle_left, roadwheel_angle_right, track_mm=1200.0,
-                       wheelbase_mm=1625.0) -> float | None:
+def wheelbase_from_geometry(geometry: dict) -> float | None:
+    """Wheelbase (mm) from an axle-scope geometry dict's vehicle_config, or
+    None if the geometry doesn't carry one."""
+    value = (geometry.get("vehicle_config") or {}).get("wheelbase")
+    return float(value) if value is not None else None
+
+
+def ackermann_pct_row(roadwheel_angle_left, roadwheel_angle_right, track_mm,
+                       wheelbase_mm) -> float | None:
     """100 x (cot(outer) - cot(inner)) / (track/wheelbase). 0% = parallel
-    steer, 100% = pure Ackermann, negative = anti-Ackermann.
+    steer, 100% = pure Ackermann, negative = anti-Ackermann. None if the
+    track or wheelbase is unknown.
 
     `roadwheel_angle` is defined per-side as "positive = turned toward the
     vehicle centerline" (a mirrored toe-in convention - confirmed against
@@ -331,6 +341,8 @@ def ackermann_pct_row(roadwheel_angle_left, roadwheel_angle_right, track_mm=1200
         return None
     if pd.isna(roadwheel_angle_left) or pd.isna(roadwheel_angle_right):
         return None
+    if track_mm is None or wheelbase_mm is None or pd.isna(track_mm) or pd.isna(wheelbase_mm):
+        return None
     psi_left = -roadwheel_angle_left
     psi_right = roadwheel_angle_right
     a_left, a_right = abs(psi_left), abs(psi_right)
@@ -346,12 +358,16 @@ def ackermann_pct_row(roadwheel_angle_left, roadwheel_angle_right, track_mm=1200
     return 100.0 * actual / ideal
 
 
-def add_ackermann_column(df: pd.DataFrame, track_mm=1200.0, wheelbase_mm=1625.0) -> pd.Series:
-    if "roadwheel_angle_left" not in df.columns or "roadwheel_angle_right" not in df.columns:
+def add_ackermann_column(df: pd.DataFrame, wheelbase_mm: float | None) -> pd.Series:
+    """Track comes from the solver's own `track` metric at each step (the
+    solved geometry, not a hard-coded number); wheelbase from the geometry
+    file (see wheelbase_from_geometry)."""
+    needed = ("roadwheel_angle_left", "roadwheel_angle_right", "track")
+    if any(c not in df.columns for c in needed) or wheelbase_mm is None:
         return _nan_series(len(df))
     return df.apply(
         lambda r: ackermann_pct_row(r["roadwheel_angle_left"], r["roadwheel_angle_right"],
-                                     track_mm, wheelbase_mm),
+                                     r["track"], wheelbase_mm),
         axis=1,
     )
 
@@ -404,7 +420,7 @@ def _point_position_frame(suspension, states: list) -> pd.DataFrame:
 # Solve one motion, assemble one tidy DataFrame
 # ===========================================================================
 
-def solve_motion(suspension, sweep_spec: dict) -> pd.DataFrame:
+def solve_motion(suspension, sweep_spec: dict, wheelbase_mm: float | None) -> pd.DataFrame:
     sweep = build_sweep(sweep_spec, suspension)
     ev = solve_evaluated_sweep(suspension, sweep)
 
@@ -419,7 +435,7 @@ def solve_motion(suspension, sweep_spec: dict) -> pd.DataFrame:
     df = pd.concat([df.reset_index(drop=True), pos_df.reset_index(drop=True)], axis=1)
 
     df["track_change"] = add_track_change_column(df)
-    df["ackermann_pct"] = add_ackermann_column(df)
+    df["ackermann_pct"] = add_ackermann_column(df, wheelbase_mm)
     for col, values in add_camber_wrt_road_columns(df).items():
         df[col] = values
     df["motion_ratio_left"] = add_motion_ratio_column(df)
@@ -471,6 +487,7 @@ def run_study(geometry: dict, out_dir: Path, kpi_list: list[float], caster_list:
                 yaml.dump(variant, f, default_flow_style=False, sort_keys=False)
 
             suspension = build_suspension(variant)
+            wheelbase_mm = wheelbase_from_geometry(variant)
             nonconverged_total = 0
 
             for name in motion_names:
@@ -478,12 +495,12 @@ def run_study(geometry: dict, out_dir: Path, kpi_list: list[float], caster_list:
                 specs = fn() if name != "bump_steer_family" else fn()
                 if name == "bump_steer_family":
                     for label, spec in specs:
-                        df = solve_motion(suspension, spec)
+                        df = solve_motion(suspension, spec, wheelbase_mm)
                         nonconverged_total += int((~df["solver_converged"]).sum())
                         if save_csvs:
                             df.to_csv(variant_dir / f"{name}_{label}.csv", index=False)
                 else:
-                    df = solve_motion(suspension, specs)
+                    df = solve_motion(suspension, specs, wheelbase_mm)
                     nonconverged_total += int((~df["solver_converged"]).sum())
                     if save_csvs:
                         df.to_csv(variant_dir / f"{name}.csv", index=False)
@@ -523,7 +540,7 @@ def smoke() -> None:
           f"in {n_iter} Newton iteration(s)")
 
     suspension = build_suspension(variant)
-    df = solve_motion(suspension, pure_steer())
+    df = solve_motion(suspension, pure_steer(), wheelbase_from_geometry(variant))
     n_bad = int((~df["solver_converged"]).sum())
     print(f"  pure_steer: {len(df)} steps, {n_bad} non-converged")
     cols = ["step_index", "roadwheel_angle_left", "roadwheel_angle_right",

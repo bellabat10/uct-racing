@@ -1,0 +1,20 @@
+# =============================================================================
+# UCT Racing FSA - steering rack parameters
+# =============================================================================
+#
+# Single source of truth for rack values shared by more than one script.
+# Read through scripts/_steering_config.py - never copy these numbers into a
+# script as a literal.
+#
+# Used by:
+#   scripts/steering_rack_optimisation.py  (max steer angle = steering ratio x half-stroke)
+#   scripts/motion_study.py                (rack travel in every steer motion)
+
+# Rack half-stroke: rack travel from centre to full lock, one direction, mm.
+#
+# PLACEHOLDER - 40 mm is not the real rack. Replace it with the chosen rack's
+# stroke from its datasheet (half of the lock-to-lock stroke). Until then the
+# max steer angle, the 25 deg hard-reject in the steering optimisation, and
+# anything near full lock in the motion study are all provisional.
+half_stroke_mm: 40.0
+half_stroke_is_placeholder: true

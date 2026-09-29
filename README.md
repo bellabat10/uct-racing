@@ -3,12 +3,51 @@
 Kinematic optimisation of suspension hardpoints, built on the `kinematics`
 solver package.
 
+## Setup
+
+Needs **Python 3.12 or newer** (the `kinematics` package's minimum); 3.13 is
+what the current outputs were generated with.
+
+Clone with the `suspension-model` submodule (our fork of open-kinematics,
+which provides the `kinematics` package):
+
+```
+git clone --recurse-submodules https://github.com/bellabat10/uct-racing.git
+cd uct-racing
+```
+
+Already cloned without it? Run `git submodule update --init` from the repo
+root. An empty `suspension-model/` folder means this step was missed.
+
+Create a virtual environment and install. On Windows (PowerShell), from the
+repo root:
+
+```
+py -3.13 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e "./suspension-model[viz,cli]" pandas
+```
+
+(`py -3.13` is the Windows Python launcher; use whichever 3.12+ version you
+have. If PowerShell refuses to run `Activate.ps1`, run
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, or use
+`.venv\Scripts\activate.bat` from Command Prompt instead. On macOS/Linux:
+`python3 -m venv .venv` and `source .venv/bin/activate`.)
+
+The `viz` extra brings in matplotlib, `cli` brings in pyyaml; pandas is used
+by the scripts in this repo. Run every script from the repo root with the
+virtual environment active, e.g. `python scripts/steering_rack_optimisation.py --smoke`.
+
 ## Repo layout
 
 - `configs/solidworks_points.yaml` — raw hardpoints exported from SolidWorks
 - `configs/convert_coordinates.py` — converts SolidWorks points to ISO 8855
 - `configs/uct_front_geometry_generated.yaml`, `uct_rear_geometry_generated.yaml`
   — converter output; these are what the scripts actually read
+- `configs/steering_rack.yaml` — rack half-stroke (currently a 40mm
+  PLACEHOLDER); the single source for every script that needs it, read via
+  `scripts/_steering_config.py`
 - `suspension-model/` — git submodule, the `kinematics` solver (installed
   editable via `pip install -e .`)
 - `scripts/mount_kpi_sweep.py` — Stage A: merged mount-height (Z) x KPI grid
@@ -16,7 +55,7 @@ solver package.
 - `scripts/caster_trail_analysis.py` — Stage B: caster / mechanical-trail
   refinement on top of Stage A's winning geometry
 - `scripts/build_optimal_geometry.py` — Stage C: confirmatory re-solve,
-  drift check, annotated wheel view, assembles `outputs/optimal/`
+  drift check, annotated wheel view, assembles `outputs/front/optimal/`
 - `scripts/_sweep_common.py` — shared solver/geometry helpers used by
   Stages A and C
 - `scripts/wheel_view.py` — the annotated side/front-view diagram
@@ -26,24 +65,23 @@ solver package.
 - `scripts/plot_motion_study.py` — diagnostic plots for `motion_study.py`'s
   output (currently: pure-steer 8-panel set, steer-at-fixed-roll overlay,
   bump-steer-family)
-- `scripts/steering_rack_optimisation.py` — solves trackrod_inboard (rack X
-  position) and trackrod_outboard (steering-arm pickup) from FVIC/SVIC
-  alignment + the team's moment-arm target, sweeps rack X, scores bump/roll
-  steer and Ackermann per candidate (see below)
-- `scripts/plot_steering_rack_optimisation.py` — 6-panel candidate sweep
-  figure plus best-candidate bump/roll/Ackermann/front-view detail plots for
-  the script above
-- `run_sweep.py` — earlier one-off sweep using the `kinematics` CLI directly
-  (superseded, kept for reference only)
-- `outputs/` — generated CSVs/plots, gitignored (not committed — run the
-  scripts locally to regenerate):
-  - `outputs/optimal/` — the current recommendation: final geometry, summary
-    CSV, `RECOMMENDATION.md`, the annotated wheel view, and everything that
-    applies to it (including `caster_and_trail/`, Stage B's own outputs)
-  - `outputs/mount_height_kpi_sweep/` — Stage A's full grid search artifacts
-  - `outputs/steering_rack_optimisation/` — rack-X sweep summary CSV plus
-    `best_candidate/` (full bump/roll/steer sweep CSVs and geometry.yaml for
-    the recommended candidate)
+- `scripts/steering_rack_optimisation.py` — Stage D: solves the tie-rod
+  hardpoints (`trackrod_inboard`, `trackrod_outboard`) on Stage C's locked
+  geometry, sweeping the steering arm inset (see below)
+- `scripts/plot_steering_rack_optimisation.py` — summary plot (bump steer,
+  roll steer, max steer angle, steering ratio vs inset) plus best-candidate
+  bump/roll steer curves for the script above
+- `outputs/` — generated CSVs/plots, committed to git so results can be
+  reviewed without re-running (re-run the scripts to regenerate):
+  - `outputs/front/optimal/` — the current recommendation: final geometry,
+    summary CSV, `RECOMMENDATION.md`, the annotated wheel view
+  - `outputs/front/caster_and_trail/` — Stage B's outputs
+  - `outputs/front/mount_height_kpi_sweep/` — Stage A's full grid search artifacts
+  - `outputs/rear/` — the same three folders for the rear corner
+  - `outputs/front/steering_rack_optimisation/` — Stage D: `summary.csv`
+    (one row per inset candidate), `summary.png`, and `best_candidate/`
+    (bump/roll/steer sweep CSVs, geometry.yaml, plots for the recommended
+    candidate); `smoke/` holds the last `--smoke` run
   - `outputs/_archive/` — outputs from the retired iteration1/2 scripts,
     kept for reference, not regenerated by anything current
 
@@ -100,7 +138,7 @@ if any of these should change):
 
 ```
 python scripts/mount_kpi_sweep.py --plots
-python scripts/caster_trail_analysis.py --geometry outputs/mount_height_kpi_sweep/best_zkpi_geometry.yaml --out-dir outputs/optimal/caster_and_trail
+python scripts/caster_trail_analysis.py --geometry outputs/front/mount_height_kpi_sweep/best_zkpi_geometry.yaml --out-dir outputs/front/caster_and_trail
 python scripts/build_optimal_geometry.py
 ```
 
@@ -108,7 +146,7 @@ Each stage also has a `--smoke` (or no-arg default, for Stage C) fast path
 to sanity-check the wiring before running the full grid. See each script's
 module docstring for the full CLI.
 
-The latest recommendation is always in `outputs/optimal/RECOMMENDATION.md`
+The latest recommendation is always in `outputs/front/optimal/RECOMMENDATION.md`
 — not copied into this README, since that number goes stale the moment the
 sweep re-runs (this bit us once already, see the 2026-08-05 changelog).
 
@@ -145,43 +183,100 @@ suite.
 
 ## Steering rack / tie-rod optimisation
 
-`scripts/steering_rack_optimisation.py` solves the two unmeasured front
-hardpoints — `trackrod_inboard` (rack X position) and `trackrod_outboard`
-(steering-arm pickup on the upright) — from the wishbone-derived FVIC/SVIC
-and the team's 150–200mm steering-moment-arm target, then sweeps rack X
-from -250 to -100mm (ISO) scoring bump steer, roll steer and Ackermann on
-each candidate. Read the module docstring before touching the constants —
-it documents why the literal front-view+side-view IC intersection is not
-used directly (it puts `trackrod_outboard` several **metres** from the
-upright, because the SVIC sits ~26.7m away for this wishbone geometry) and
-what buildable substitute is used instead.
+`scripts/steering_rack_optimisation.py` is a standalone Stage D. It takes
+the wishbone/kingpin geometry Stages A/B/C have locked and solves only the
+two tie-rod hardpoints, `trackrod_inboard` (rack end) and
+`trackrod_outboard` (steering-arm pickup on the upright). It never moves a
+wishbone point.
 
-Key finding: with this wishbone geometry, satisfying the front-view IC
-(near-zero bump steer at static) pins `trackrod_outboard`'s Y so close to
-the kingpin axis that no buildable steering-arm reach can also hit the
-40–80% Ackermann target — even 500mm+ of arm only gets to the low end.
-This is a genuine conflict between the moment-arm and Ackermann targets for
-this car, not a search/tuning problem; see
-`outputs/steering_rack_optimisation/run_log.txt` and the summary plot's
-Ackermann panel. Rack X itself is chosen on bump/roll steer through travel,
-which both improve monotonically toward the -100mm end of the search range
-(candidates below about -200mm are kinematically infeasible for the
-solved `trackrod_outboard` and are excluded, not silently skipped).
+**Stage C must have run first.** The input is
+`outputs/front/optimal/optimal_geometry.yaml`; if it's missing, run
+`python scripts/run_front_pipeline.py`. Stage D is not part of that
+pipeline runner, so run it separately afterwards (and re-run it whenever
+Stage C changes).
+
+**Inputs and fixed values**
+
+| What | Where | Current value |
+|---|---|---|
+| Locked wishbone geometry | `--geometry` | Stage C `optimal_geometry.yaml` |
+| Rack height (rack end, ISO z above ground, absolute) | `--rack-height-z` | 188.24 mm |
+| Rack end lateral position (half-rack) | `TRACKROD_INBOARD_Y` in the script | 305 mm (awaiting confirmation) |
+| Tie-rod outboard point, distance behind kingpin axis | `--steering-arm-rearward-offset` | 60 mm, fixed |
+| Rack half-stroke | `configs/steering_rack.yaml` | 40 mm, **placeholder** |
+| Bump travel (bump-steer sweep, up from ride height) | `--bump-travel` | 25 mm (damper-stroke limit) |
+| Droop travel (bump-steer sweep, down from ride height) | `--droop-travel` | 25 mm, **placeholder** |
+
+To use a rack height from SolidWorks: ISO z = SolidWorks Y + 108.24.
+
+**How it works.** The tie rod is laid along the line from the rack end
+through the front-view instant centre (FVIC), which gives zero bump-steer
+*slope* at ride height. The one swept variable is the **steering arm
+inset**: how far the tie-rod outboard point sits sideways, inboard of the
+kingpin axis (default 40–200 mm in 5 mm steps, 33 candidates). The inset
+plus the fixed rearward offset give the **true steering arm length**
+(perpendicular distance from the kingpin axis), reported as
+`steering_arm_length_mm`. The module docstring explains why the side-view
+instant centre isn't used to place anything.
+
+**Scoring.** Each candidate is solved through three sweeps:
+- **Bump:** 25 mm droop to 25 mm bump, using the car's real wheel travel.
+- **Roll:** ±25 mm, the same as Stages A/C.
+- **Rack:** a small ±5 mm sweep that measures the steering ratio.
+
+> **Not directly comparable with Stage C.** Stage C measures bump steer
+> over ±30 mm of travel; this script uses the real 25/25 mm. Bump steer
+> grows roughly with the square of travel, so the same geometry reads about
+> 30% lower here than in Stage C's `bump_steer_max`.
+
+- Max steer angle = steering ratio × rack half-stroke. Candidates under 25°
+  are rejected and not scored. This depends on the placeholder stroke.
+- PASS needs bump steer ≤ 0.05° and roll steer slope within ±0.02 °/°, the
+  same targets as Stage C (read from `_sweep_common.TARGETS_FULL`).
+- The recommendation is the lowest-cost candidate (distance past the bump
+  and roll targets), whether or not it passes.
+- Reported but not scored: steering ratio, and the peak toe change anywhere
+  in the roll sweep (`roll_toe_change_peak_deg`). The peak matters because
+  the toe-vs-roll curve is symmetric, so its straight-line slope can be near
+  zero while the toe change at full roll is not.
 
 ```
-python scripts/steering_rack_optimisation.py --smoke   # 3 candidates, wiring check
-python scripts/steering_rack_optimisation.py           # full 16-candidate sweep
-python scripts/plot_steering_rack_optimisation.py       # summary + best-candidate plots
+python scripts/steering_rack_optimisation.py --smoke        # 3 candidates (min/mid/max inset), wiring check
+python scripts/steering_rack_optimisation.py                # full sweep
+python scripts/steering_rack_optimisation.py --rack-height-z 220   # e.g. a new rack height
+python scripts/steering_rack_optimisation.py --droop-travel 35     # e.g. once droop is confirmed
+python scripts/plot_steering_rack_optimisation.py           # plots for the full run
+python scripts/plot_steering_rack_optimisation.py --run-dir outputs/front/steering_rack_optimisation/smoke
 ```
 
-Outputs: `outputs/steering_rack_optimisation/summary.csv` (one row per rack
-X candidate, `feasible=False` rows kept for the infeasible band),
-`outputs/steering_rack_optimisation/best_candidate/` (full bump/roll/steer
-sweep CSVs + resolved `geometry.yaml` for the recommendation), and five
-PNGs under `outputs/` (`steering_rack_optimisation_summary.png` plus four
-`best_candidate_*.png` detail plots).
+Outputs, all in `outputs/front/steering_rack_optimisation/`:
+
+- `summary.csv`: one row per inset candidate, with infeasible ones kept as
+  `feasible=False`.
+- `best_candidate/`: bump/roll/steer sweep CSVs, `geometry.yaml` (the Stage C
+  geometry with the solved tie rod) and `linkage_4view.png`.
+- After plotting: `summary.png`, plus `best_candidate/bump_steer.png` and
+  `best_candidate/roll_steer.png`.
+
+Ackermann is not scored or reported here (parked).
 
 ## Changelog
+
+### 2026-09-29 (steering clean-up before VD handover)
+- Steering: absolute `--rack-height-z` replaces the offset flag; the swept
+  variable is renamed "inset" and the true steering arm length is reported;
+  the rearward offset is a named, documented parameter; pass thresholds
+  now match Stage C; inset range widened to 40–200 mm.
+- Steering bump-steer sweep uses the real wheel travel (`--bump-travel`
+  25 mm, `--droop-travel` 25 mm placeholder); Stage C keeps ±30 mm, so the
+  two bump-steer numbers aren't directly comparable. Peak toe change in
+  roll is now reported.
+- Rack half-stroke moved to `configs/steering_rack.yaml` (still a
+  placeholder), read by both the steering script and the motion study.
+- Motion study: Ackermann uses the solver's track and the geometry's
+  wheelbase instead of hard-coded 1200/1625 mm.
+- Rewrote `plot_steering_rack_optimisation.py` for the current method.
+- Removed the superseded `run_sweep.py` and `configs/uct_front_sweep.yaml`.
 
 ### 2026-08-06 (motion study)
 - Added `scripts/motion_study.py` and `scripts/plot_motion_study.py`,
