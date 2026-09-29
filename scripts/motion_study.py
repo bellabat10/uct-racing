@@ -81,6 +81,9 @@ ROLL_MM = 25.0    # +/- mm per wheel, opposed (~2.4 deg roll at 1200mm track)
 RACK_MM = 40.0    # PLACEHOLDER - confirm the real lock-to-lock half-stroke
                   # with the steering team. Anything near the ends of a
                   # steer sweep is untrustworthy until that number is real.
+                  # Shares this placeholder value with RACK_STEER_HALF_STROKE_MM
+                  # in scripts/steering_rack_optimisation.py - update both
+                  # together, never just one.
 
 STEPS_TRAVEL = 61  # heave/roll/single-wheel-bump motions (steps.py must be odd for a static step)
 STEPS_STEER = 81   # any motion where the rack value changes across the sweep
